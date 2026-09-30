@@ -2,16 +2,37 @@
 grep -q "$(printf '\r')" "$0" && printf '%s\n' "ERROR: $0 has Windows line endings. Fix: tr -d '\\r' < $0 > /tmp/nshunt-fixed.sh ; sh /tmp/nshunt-fixed.sh" && exit 2
 # nshunt.sh - quick NetScaler compromise hunt. Prints findings only.
 #
-# Usage:  sh nshunt.sh        (read-only; writes nothing except a temp dir)
+# Usage:  sh nshunt.sh        (read-only; changes nothing on the box)
 #
-#   HIGH    evidence that the box was (or may have been) compromised
-#   ATTACK  exploitation attempts found in the logs still on the box
-#   CHECK   unusual, needs a human look
+# The output is shown on screen and saved to ./results-nshunt.txt (another
+# file: NSHUNT_OUT=/path/file). Only that file and a temp dir are written.
+#
+#   COMPROMISE  signs that the box was (or may have been) compromised
+#   ATTEMPT     attack attempts found in the logs still on the box - an
+#               attempt is NOT a success; only COMPROMISE findings are
+#               signs of success
+#   REVIEW      unusual, needs a human look - often legitimate
 #
 # Exit code: 0 = no findings, 1 = findings, 2 = scan incomplete (unreadable
 # logs or a check that crashed) - never trust "no findings" with exit 2.
 
-VERSION=1.3
+VERSION=1.4
+
+# Save everything to the results file: run the script again as a child and
+# copy its output to the screen and the file, keeping its exit code.
+if [ -z "${NSHUNT_CHILD:-}" ]; then
+	OUT=${NSHUNT_OUT:-./results-nshunt.txt}
+	case "$OUT" in /*) ;; *) OUT=$(pwd)/${OUT#./} ;; esac
+	if ( : > "$OUT" ) 2>/dev/null; then
+		st=$(mktemp /tmp/nshunt-rc.XXXXXX) || exit 2
+		{ NSHUNT_CHILD=1 sh "$0" "$@" 2>&1; echo $? > "$st"; } | tee "$OUT"
+		rc=$(cat "$st"); rm -f "$st"
+		echo "Saved to: $OUT"
+		exit "${rc:-2}"
+	fi
+	echo "NOTE: cannot write $OUT - output is shown on screen only." >&2
+fi
+
 R=${NSHUNT_ROOT:-}   # test hook: prefix for all paths
 WEB="/var/netscaler/logon /var/netscaler/gui /netscaler/ns_gui /var/vpn"
 
@@ -98,8 +119,8 @@ done
 	fi
 	[ -d "$R/netscaler/portal/templates" ] &&
 		find "$R/netscaler/portal/templates" -type f -user nobody 2>>"$E" | list >> "$T/f"
-	finding HIGH "CVE-2019-19781 exploit files: this box was exploited (Jan 2020 wave)" "$T/f"
-	finding CHECK "Bookmarks last modified during the Jan 2020 exploitation wave - random names and empty stubs point to the exploit, real user names may be legit" "$T/f2"
+	finding COMPROMISE "CVE-2019-19781 exploit files: this box was exploited (Jan 2020 wave)" "$T/f"
+	finding REVIEW "Bookmarks last modified during the Jan 2020 exploitation wave - random names and empty stubs point to the exploit, real user names may be legit" "$T/f2"
 ) || { echo "[SKIPPED] check 1 (CVE-2019-19781 (Shitrix) bookmark / template files) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 2. Shell commands injected through the VPN login (2026 attacks) -------
@@ -212,10 +233,10 @@ done
 				cat "$T/web" >> "$T/f"
 			fi
 		fi
-		finding ATTACK "Shell commands sent in the VPN login name (command injection)" "$T/f"
-		finding HIGH "A file the attackers tried to create EXISTS - the attack may have worked" "$T/exists"
-		finding HIGH "A file the attackers tried to create was served (2xx) AFTER the attempt - the attack probably worked; check size and client" "$T/dl"
-		finding CHECK "A file the attackers tried to create was served (2xx), but the times could not be compared - check whether it was after the attempt" "$T/dlunk"
+		finding ATTEMPT "Shell commands sent in the VPN login name (command injection)" "$T/f"
+		finding COMPROMISE "A file the attackers tried to create EXISTS - the attack may have worked" "$T/exists"
+		finding COMPROMISE "A file the attackers tried to create was served (2xx) AFTER the attempt - the attack probably worked; check size and client" "$T/dl"
+		finding REVIEW "A file the attackers tried to create was served (2xx), but the times could not be compared - check whether it was after the attempt" "$T/dlunk"
 	fi
 ) || { echo "[SKIPPED] check 2 (Shell commands injected through the VPN login (2026 attacks)) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
@@ -228,7 +249,7 @@ done
 		cut -c1-200 > "$T/m"
 	head -10 "$T/m" > "$T/f"
 	n=$(wc -l < "$T/m" | tr -d ' '); [ "$n" -gt 10 ] && echo "... $((n - 10)) more" >> "$T/f"
-	finding ATTACK "Injected commands in /var/log/messages (fake packet engine messages)" "$T/f"
+	finding ATTEMPT "Injected commands in /var/log/messages (fake packet engine messages)" "$T/f"
 ) || { echo "[SKIPPED] check 2b (Injected commands in /var/log/messages) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 3. Blocked path-traversal probes carrying commands --------------------
@@ -236,7 +257,7 @@ done
 	logs | grep 'Path traversal detected' | grep -iE 'curl|wget|%3b|;|\|' |
 	awk '{ ip = "?"; if (match($0, /Source: [0-9a-fA-F.:]+:[0-9]+/)) { ip = substr($0, RSTART + 8, RLENGTH - 8); sub(/:[0-9]+$/, "", ip) }
 		n[ip]++ } END { for (ip in n) printf "%-16s %d probe(s), blocked by the NetScaler\n", ip, n[ip] }' | sort > "$T/f"
-	finding ATTACK "Path-traversal probes carrying commands (blocked)" "$T/f"
+	finding ATTEMPT "Path-traversal probes carrying commands (blocked)" "$T/f"
 ) || { echo "[SKIPPED] check 3 (Blocked path-traversal probes carrying commands) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 4. Web shells ---------------------------------------------------------
@@ -254,7 +275,7 @@ done
 	set -- $(dirs "/var/netscaler/logon/LogonPoint/custom /var/vpn")
 	[ $# -gt 0 ] && grep -rlE 'passthru[[:space:]]*\(|NSC_TASS' "$@" 2>>"$E" | list >> "$T/f"
 	sort -u -o "$T/f" "$T/f"
-	finding HIGH "Script or PHP code in a web folder (possible web shell)" "$T/f"
+	finding COMPROMISE "Script or PHP code in a web folder (possible web shell)" "$T/f"
 ) || { echo "[SKIPPED] check 4 (Web shells) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 5. Files the web server created outside the bookmark store ------------
@@ -263,7 +284,7 @@ done
 	set -- $(dirs "/var/netscaler/logon /var/netscaler/gui /netscaler/ns_gui")
 	: > "$T/f"
 	[ $# -gt 0 ] && find "$@" -type f -user nobody 2>>"$E" | list > "$T/f"
-	finding HIGH "Files owned by 'nobody' in web folders (written by the web server)" "$T/f"
+	finding COMPROMISE "Files owned by 'nobody' in web folders (written by the web server)" "$T/f"
 ) || { echo "[SKIPPED] check 5 (Files the web server created outside the bookmark store) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 6. Hidden files in web folders ----------------------------------------
@@ -277,8 +298,8 @@ done
 		# published web shell name (GreyNoise, CVE-2026-88771)
 		find "$@" -name '.ctxs.receiver' 2>>"$E" | list > "$T/f2"
 	fi
-	finding HIGH "Known web shell file .ctxs.receiver (2026 attacks)" "$T/f2"
-	finding CHECK "Hidden files in web folders" "$T/f"
+	finding COMPROMISE "Known web shell file .ctxs.receiver (2026 attacks)" "$T/f2"
+	finding REVIEW "Hidden files in web folders" "$T/f"
 ) || { echo "[SKIPPED] check 6 (Hidden files in web folders) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 7. Credential stealers in login-page JavaScript / HTML ----------------
@@ -315,7 +336,7 @@ done
 			-exec grep -lE "<script[^>]+src=[\"']?https?://" {} + 2>>"$E" | list |
 			sed 's/$/  (loads a script from an external site)/' >> "$T/f"
 	fi
-	finding CHECK "Login page code that may steal passwords - open these files and look" "$T/f"
+	finding REVIEW "Login page code that may steal passwords - open these files and look" "$T/f"
 ) || { echo "[SKIPPED] check 7 (Credential stealers in login-page JavaScript / HTML) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 8. Unknown setuid/setgid programs -------------------------------------
@@ -327,7 +348,7 @@ done
 		sed "s|^$R||" | sort -u |
 		grep -v -E '^/(bin|sbin|usr/bin|usr/sbin|usr/libexec|usr/local/bin|usr/local/sbin)/|^/netscaler/(ping6?|traceroute6?)$|^/var/configd_devno$|^/var/run/.*\.pid$' |
 		while IFS= read -r f; do printf '%s  %s\n' "$(when "$R$f")" "$f"; done > "$T/f"
-	finding HIGH "Unknown setuid/setgid programs (possible root backdoor)" "$T/f"
+	finding COMPROMISE "Unknown setuid/setgid programs (possible root backdoor)" "$T/f"
 ) || { echo "[SKIPPED] check 8 (Unknown setuid/setgid programs) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 9. User crontabs ------------------------------------------------------
@@ -338,7 +359,7 @@ done
 	[ -f "$R/etc/crontab" ] && grep -nE 'curl|wget|fetch[[:space:]]' "$R/etc/crontab" 2>>"$E" | grep -v '^[0-9]*:[[:space:]]*#' |
 		grep -vE '(curl|wget|fetch)[^|;&]*[[:space:]]"?(https?://)?(localhost|127\.0\.0\.1)([:/"[:space:]]|$)' |
 		sed 's|^|/etc/crontab:|' >> "$T/f"
-	finding CHECK "Crontabs that run user jobs or downloads (attackers use these to come back)" "$T/f"
+	finding REVIEW "Crontabs that run user jobs or downloads (attackers use these to come back)" "$T/f"
 ) || { echo "[SKIPPED] check 9 (User crontabs) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 10. Unknown programs in temp folders ----------------------------------
@@ -349,8 +370,10 @@ done
 	[ $# -gt 0 ] && find "$@" -type f \( -perm -0100 -o -name '*.so' -o -name '*.php' -o -name '*.pl' -o -name '*.py' \) 2>>"$E" |
 		sed "s|^$R||" |
 		grep -v -E '^/var/tmp/(Fortville_Silicom_Intel|Mellanox|par-[^/]*)/|^/var/tmp/sum$|^/tmp/nshunt\.' |
+		# NetScaler Console Security Advisory scan scripts
+		grep -v -E '^/var/tmp/(CVE-[0-9]{4}-[0-9]+-detection|[a-z_]+_vulnerability_dete[t]?ction)\.py$' |
 		while IFS= read -r f; do printf '%s  %s\n' "$(when "$R$f")" "$f"; done | sort > "$T/f"
-	finding CHECK "Programs in temp folders" "$T/f"
+	finding REVIEW "Programs in temp folders" "$T/f"
 ) || { echo "[SKIPPED] check 10 (Unknown programs in temp folders) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 11. Web server config: PHP handlers and aliases (WHIPSHOT) ------------
@@ -399,8 +422,8 @@ done
 	# strip only the level prefix: config lines may contain tabs themselves
 	awk 'sub(/^HIGH\t/, "")' "$T/conf" > "$T/f"
 	awk 'sub(/^CHECK\t/, "")' "$T/conf" > "$T/f2"
-	finding HIGH "Web server config changed to run disguised files as PHP (web shell persistence)" "$T/f"
-	finding CHECK "Unusual PHP settings in the web server config - compare with another box on the same build" "$T/f2"
+	finding COMPROMISE "Web server config changed to run disguised files as PHP (web shell persistence)" "$T/f"
+	finding REVIEW "Unusual PHP settings in the web server config - compare with another box on the same build" "$T/f2"
 ) || { echo "[SKIPPED] check 11 (Web server config) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 12. Startup scripts (run at every boot, survive a reboot) -------------
@@ -418,7 +441,7 @@ done
 		grep -niE 'python[0-9.]*[[:space:]]+-c|base64[.](b64|b85)decode|zlib[.]decompress|fnoc[.]dptth|php[.]xedni|relacsten|hs/pmt/rav/|tnioPnogoL|gifnocsn' \
 			"$R$c" 2>>"$E" | cut -c1-200 | sed "s|^|$c:|"
 	done >> "$T/f"
-	finding CHECK "Startup scripts run loaders, downloads or permission changes at boot" "$T/f"
+	finding REVIEW "Startup scripts run loaders, downloads or permission changes at boot" "$T/f"
 ) || { echo "[SKIPPED] check 12 (Startup scripts) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 13. Fake .deb packages in web folders (WHIPSHOT disguise) -------------
@@ -436,7 +459,7 @@ done
 	[ $# -gt 0 ] && find "$@" -maxdepth 1 -type f 2>>"$E" | while IFS= read -r f; do
 		if [ "$(head -c 2 "$f" 2>>"$E")" = '#!' ] || grep -qI '<?' "$f" 2>>"$E"; then printf '%s\n' "$f"; fi
 	done | list | sed 's/$/  (script in a client-package folder)/' >> "$T/f"
-	finding HIGH "Disguised files in web folders (fake .deb packages, scripts among client packages)" "$T/f"
+	finding COMPROMISE "Disguised files in web folders (fake .deb packages, scripts among client packages)" "$T/f"
 ) || { echo "[SKIPPED] check 13 (Fake .deb packages) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 14. Shells / interpreters with setuid or setgid -----------------------
@@ -448,7 +471,7 @@ done
 	[ $# -gt 0 ] && find "$@" -maxdepth 1 -type f \( -perm -4000 -o -perm -2000 \) \
 		\( -name sh -o -name bash -o -name dash -o -name csh -o -name tcsh -o -name ksh -o -name zsh \
 		-o -name 'python*' -o -name 'perl*' -o -name 'php*' -o -name nc -o -name busybox \) 2>>"$E" | list > "$T/f"
-	finding HIGH "Shell or interpreter with setuid/setgid bit (anyone running it gets root)" "$T/f"
+	finding COMPROMISE "Shell or interpreter with setuid/setgid bit (anyone running it gets root)" "$T/f"
 ) || { echo "[SKIPPED] check 14 (setuid shells) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 15. SLAPSHOT tunnel (hidden Python backdoor) --------------------------
@@ -466,7 +489,7 @@ done
 			awk '{ for (i = 3; i <= NF; i++) if ($i ~ /(^|\/)(lula|update_c[^\/]*\.pl|\.x)$/ || $i == "/var/1.py") { print; break } }' |
 			cut -c1-200 | sed 's/^/running: /' >> "$T/f"
 	fi
-	finding HIGH "SLAPSHOT tunnel or known payload process running" "$T/f"
+	finding COMPROMISE "SLAPSHOT tunnel or known payload process running" "$T/f"
 ) || { echo "[SKIPPED] check 15 (SLAPSHOT tunnel) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 16. Web access log: web shell URLs and base64 payloads ----------------
@@ -478,19 +501,19 @@ done
 	decode() { command -v openssl >/dev/null 2>&1 || return 0
 		sort -u | head -5 | while IFS= read -r x; do
 			printf '  decoded %s... -> %s\n' "$(printf '%s' "$x" | cut -c1-16)" \
-				"$(printf '%s' "$x" | openssl base64 -d -A 2>/dev/null | tr -c '[:print:]' '.' | cut -c1-150)"
+				"$(printf '%s' "$x" | openssl base64 -d -A 2>/dev/null | tr -c '[:print:]' '.' | cut -c1-400)"
 		done; }
 
 	alogs | grep -E '/[0-9A-Fa-f]{6,}\.(ico|sig)|nsginstaller\.deb' > "$T/acc"
 	cap "$T/acc" > "$T/f"
 	[ -s "$T/f" ] && echo "(WHIPSHOT answers 404 - a 404 with a large response size means the shell ran)" >> "$T/f"
-	finding ATTACK "Requests for web shell URLs (<hex>.ico / .sig) in the web access logs" "$T/f"
+	finding ATTEMPT "Requests for web shell URLs (<hex>.ico / .sig) in the web access logs" "$T/f"
 
 	alogs | grep -E '"INDEX:[A-Za-z0-9+/=]{8,}|"[A-Za-z0-9+/]{40,}={0,2}"[[:space:]]*$' > "$T/ua"
 	cap "$T/ua" > "$T/f"
 	grep -oE '"INDEX:[A-Za-z0-9+/=]{8,}|"[A-Za-z0-9+/]{40,}={0,2}"[[:space:]]*$' "$T/ua" |
 		sed -e 's/^"INDEX://' -e 's/[" ]//g' | decode >> "$T/f"
-	finding ATTACK "Base64 payloads sent as User-Agent (staging for the log-injection attack)" "$T/f"
+	finding ATTEMPT "Base64 payloads sent as User-Agent (staging for the log-injection attack)" "$T/f"
 ) || { echo "[SKIPPED] check 16 (Web access log) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 17. Recent crashes -----------------------------------------------------
@@ -519,7 +542,7 @@ done
 		echo "$(wc -l < "$T/crash" | tr -d ' ') packet engine crash / DTLS failure log line(s) in the last 14 days, newest:" >> "$T/f"
 		tail -3 "$T/crash" | cut -c1-200 | sed 's/^/  /' >> "$T/f"
 	fi
-	finding CHECK "Packet engine crashes in the last 14 days (CVE-2026-88772 exploits crash it)" "$T/f"
+	finding REVIEW "Packet engine crashes in the last 14 days (CVE-2026-88772 exploits crash it)" "$T/f"
 ) || { echo "[SKIPPED] check 17 (Recent crashes) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 18. Known attacker IP addresses ---------------------------------------
@@ -530,12 +553,12 @@ done
 	IPS="$IPS|78\\.128\\.113\\.10|138\\.28\\.234\\.38|82\\.167\\.14\\.7|154\\.217\\.251\\.226|85\\.203\\.46\\.191|62\\.133\\.62\\.80|31\\.56\\.197\\.72|64\\.94\\.85\\.67|158\\.94\\.209\\.12|23\\.27\\.143\\.20|68\\.178\\.160\\.183|5\\.188\\.206\\.226|92\\.118\\.204\\.229"
 	{ logs; logs messages; alogs; } | grep -v 'shell_command=' | grep -oE "(^|[^0-9.])($IPS)([^0-9]|\$)" |
 		grep -oE "$IPS" | sort | uniq -c | awk '{ printf "%-16s %d log line(s)\n", $2, $1 }' > "$T/f"
-	finding ATTACK "Known attacker IP addresses in the logs" "$T/f"
+	finding ATTEMPT "Known attacker IP addresses in the logs" "$T/f"
 	: > "$T/f2"
 	if [ -z "$R" ] && command -v netstat >/dev/null 2>&1; then
 		netstat -an 2>>"$E" | grep -E "(^|[^0-9.])($IPS)[.:][0-9]+([^0-9]|\$)" > "$T/f2"
 	fi
-	finding HIGH "Open network connection to a known attacker IP right now" "$T/f2"
+	finding COMPROMISE "Open network connection to a known attacker IP right now" "$T/f2"
 ) || { echo "[SKIPPED] check 18 (Known attacker IP addresses) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 19. Files written by the published exploit payloads -------------------
@@ -561,8 +584,8 @@ done
 	# output of "id" written to a file = proof an injected command ran
 	# shellcheck disable=SC2046
 	set -- $(dirs "/tmp /var/tmp /var/vpn /var/netscaler/logon /netscaler/ns_gui/vpn")
-	[ $# -gt 0 ] && find "$@" -maxdepth 3 -type f -size -2k -exec grep -lE '^uid=[0-9]+\([a-z_]+\) gid=' {} + 2>>"$E" |
-		list | sed 's/$/  (contains output of the id command)/' >> "$T/f"
+	[ $# -gt 0 ] && find "$@" -maxdepth 3 -type f -size -2k -exec grep -lE 'uid=[0-9]+\([a-z_]+\) gid=|NX-CVE-OK' {} + 2>>"$E" |
+		list | sed 's/$/  (contains output of the id command or an exploit canary)/' >> "$T/f"
 	# An archive disguised as a web file: how a stolen /flash/nsconfig is staged
 	# for download. grep -l finds files containing a gzip/zip/tar signature
 	# anywhere (one pass); each hit is then checked at the right offset.
@@ -577,7 +600,7 @@ done
 		[ -z "$t" ] && [ "$(head -c 262 "$f" 2>>"$E" | tail -c 5)" = ustar ] && t=tar
 		[ -n "$t" ] && printf '%s  %s  (%s archive, %s bytes - possible stolen config)\n' "$(when "$f")" "${f#$R}" "$t" "$(wc -c < "$f" | tr -d ' ')"
 	done >> "$T/f"
-	finding HIGH "Files written by the published exploit payloads (do not open them on the box - they may hold config data)" "$T/f"
+	finding COMPROMISE "Files written by the published exploit payloads (do not open them on the box - they may hold config data)" "$T/f"
 ) || { echo "[SKIPPED] check 19 (Exploit payload files) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 20. Exploit, scanner and probe strings in the web logs ----------------
@@ -585,13 +608,21 @@ done
 	# errlogs: every httperror*.log* rotation, unzipped
 	errlogs() { for f in "$R"/var/log/httperror*.log "$R"/var/log/httperror*.log.*; do
 		[ -f "$f" ] || continue; case "$f" in *.gz) gzip -dc "$f" ;; *) cat "$f" ;; esac; done 2>/dev/null; }
-	# sum <label>: stdin log lines -> "label: N line(s) from IP, IP, ..." (web log lines start with the IP)
-	# sum <label> [noip]: stdin log lines -> "label  N line(s) from IP, IP, ..."
-	# (web log lines start with the client IP; ns.log lines do not)
-	sum() { awk -v l="$1" -v noip="$2" '{ n++; ip = $1
-		if (ip !~ /^[0-9a-fA-F.:]+$/) { ip = ""; if (match($0, /client [0-9a-fA-F.:]+/)) { ip = substr($0, RSTART + 7, RLENGTH - 7); sub(/:[0-9]+$/, "", ip) } }
-		if (ip != "" && !(ip in s)) { s[ip]; if (++k <= 5) ips = ips (k > 1 ? ", " : "") ip } }
-		END { if (n) printf "%-46s %d line(s)%s\n", l, n, (noip || !k ? "" : " from " ips (k > 5 ? ", ..." : "")) }'; }
+	# sum <label> [noip]: stdin log lines -> "label: N line(s), status 404 x3" and
+	# the client IPs. Web log lines start with the client IP, error log lines
+	# say "client IP"; 127.0.0.x is the NetScaler itself forwarding the request.
+	sum() { awk -v l="$1" -v noip="$2" '
+		{ n++; ip = $1
+		  if (ip !~ /^[0-9a-fA-F.:]+$/) { ip = ""; if (match($0, /client [0-9a-fA-F.:]+/)) { ip = substr($0, RSTART + 7, RLENGTH - 7); sub(/:[0-9]+$/, "", ip) } }
+		  if (ip ~ /^127\./) { lo++; ip = "" }
+		  if (ip != "" && !(ip in s)) { s[ip]; if (++k <= 5) ips = ips (k > 1 ? ", " : "") ip }
+		  if (match($0, /" [0-9][0-9][0-9] /)) { st = substr($0, RSTART + 2, 3); if (!(st in c)) so[++m] = st; c[st]++ } }
+		END { if (!n) exit
+			printf "%s: %d line(s)", l, n
+			if (m) { printf ", status"; for (i = 1; i <= m; i++) printf "%s %s x%d", (i > 1 ? "," : ""), so[i], c[so[i]] }
+			printf "\n"
+			if (!noip && k) printf "    from %s%s\n", ips, (k > 5 ? " and " k - 5 " more" : "")
+			if (!noip && lo) printf "    %sfrom 127.0.0.x - the NetScaler itself, this log does not show the real client\n", (k ? "also " : "") }'; }
 	{
 		alogs | grep -E 'httpworkbench|NX-CVE-OK|nx_verify|wtw888|ns-88771-poc|PoCbit' | sum "exploit canary / scanner strings"
 		alogs | grep -E 'LogonPoint/custom/receiver\.min(\.[0-9a-f]+)?\.css|\.ctxs\.receiver' | sum "requests for the .ctxs.receiver web shell"
@@ -600,9 +631,16 @@ done
 		errlogs | grep -iE '/vpns?/scripts/[^ ]*\.(deb|sig|php)|/vpn/media/[^ ]*\.ico' | sum "errors for package/icon files (web shell use)"
 		logs | grep -v 'shell_command=' | grep -E 'scanner-probe' | sum "scanner-probe login attempts" noip
 	} > "$T/f"
-	finding ATTACK "Exploit, scanner and probe strings in the logs (the box was found and tested)" "$T/f"
+	finding ATTEMPT "Exploit, scanner and probe strings in the logs (the box was found and tested)" "$T/f"
+	# The exploit canary served = the injected command ran (the file never
+	# exists on a clean box). xua.html / c88771.json are timed against the
+	# attempt in check 2 instead.
+	alogs | grep -E '"[A-Z]+ [^ "]*/nx_verify\.html[ ?][^"]*" 2[0-9][0-9] ' | cut -c1-200 > "$T/can"
+	head -10 "$T/can" > "$T/f3"
+	n=$(wc -l < "$T/can" | tr -d ' '); [ "$n" -gt 10 ] && echo "... $((n - 10)) more" >> "$T/f3"
+	finding COMPROMISE "The exploit canary nx_verify.html was served (2xx) - an injected command ran on this box" "$T/f3"
 	alogs | grep -E 'HeadlessChrome' | sum "HeadlessChrome requests" > "$T/f2"
-	finding CHECK "Headless browser automation against the Gateway (may be your own monitoring)" "$T/f2"
+	finding REVIEW "Headless browser automation against the Gateway (may be your own monitoring)" "$T/f2"
 ) || { echo "[SKIPPED] check 20 (Exploit and probe strings) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 21. Shell history: LDAP credential and key theft ---------------------
@@ -617,7 +655,7 @@ done
 		grep -vE 'sh_command="[[:space:]]*(z?[ef]?grep|awk|sed|find|ls)[[:space:]]' | cut -c1-200 > "$T/h"
 	n=$(wc -l < "$T/h" | tr -d ' ')
 	{ [ "$n" -gt 10 ] && echo "... $((n - 10)) older line(s) not shown"; tail -10 "$T/h"; } > "$T/f"
-	finding CHECK "Shell commands that read LDAP credentials or keys - check who ran them" "$T/f"
+	finding REVIEW "Shell commands that read LDAP credentials or keys - check who ran them" "$T/f"
 ) || { echo "[SKIPPED] check 21 (Shell history) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- Summary ---------------------------------------------------------------
@@ -626,12 +664,14 @@ nl=$(ls "$R"/var/log/ns.log* 2>/dev/null | wc -l | tr -d ' ')
 na=$(ls "$R"/var/log/httpaccess*.log* 2>/dev/null | wc -l | tr -d ' ')
 old=$(ls "$R"/var/log/ns.log.*.gz 2>/dev/null | sort -t. -k3 -n | tail -1)
 [ -n "$old" ] && old=$(gzip -dc "$old" 2>/dev/null | head -1 | awk '{ print $1, $2 }')
-h=$(grep -c '^HIGH$' "$T/count"); a=$(grep -c ATTACK "$T/count"); c=$(grep -c CHECK "$T/count")
+h=$(grep -c '^COMPROMISE$' "$T/count"); a=$(grep -c '^ATTEMPT$' "$T/count"); c=$(grep -c '^REVIEW$' "$T/count")
 echo ""
 if [ $((h + a + c)) -eq 0 ]; then
 	echo "RESULT: no findings."
 else
-	echo "RESULT: $h HIGH, $a ATTACK, $c CHECK."
+	echo "RESULT: $h COMPROMISE, $a ATTEMPT, $c REVIEW."
+	echo "        (number of [COMPROMISE] / [ATTEMPT] / [REVIEW] blocks above - each block is one"
+	echo "        kind of evidence, not an IP address or an attempt; see the lines in each block)"
 fi
 nbad=$(wc -l < "$T/badlogs" | tr -d ' '); sk=$(grep -c SKIPPED "$T/count")
 awk '!seen[$0]++' "$E" > "$E.u"; mv "$E.u" "$E"; nerr=$(wc -l < "$E" | tr -d ' ')
@@ -642,6 +682,40 @@ if [ "$nbad" -gt 0 ] || [ "$sk" -gt 0 ] || [ "$nerr" -gt 0 ]; then
 	[ "$nerr" -gt 0 ] && head -5 "$E" | sed "${R:+s|$R||g;} s/^/  error: /"
 fi
 echo "Log checks only see logs still on the box${old:+ (back to $old)}; older attacks need your syslog server."
+echo ""
+echo "What this means:"
+if [ "$h" -gt 0 ]; then
+	echo "  COMPROMISE - signs that the box WAS compromised. Treat it as compromised:"
+	echo "               do not reboot or upgrade yet, copy /var/log and the listed"
+	echo "               files off the box, check the HA peer, then rebuild it and"
+	echo "               change nsroot, LDAP/RADIUS bind passwords and certificate"
+	echo "               keys (Citrix CTX694799)."
+fi
+if [ "$a" -gt 0 ]; then
+	if [ "$h" -eq 0 ]; then
+		echo "  ATTEMPT    - the box was attacked, but these are only ATTEMPTS found in"
+		echo "               the logs. 0 COMPROMISE means no sign that any attempt"
+		echo "               succeeded. Make sure the box runs a fixed build, and check"
+		echo "               your firewall logs for connections to the listed IPs and URLs."
+	else
+		echo "  ATTEMPT    - attack attempts in the logs (on their own not proof of success);"
+		echo "               together with the COMPROMISE findings they show when and"
+		echo "               how the box was compromised."
+	fi
+fi
+if [ "$c" -gt 0 ]; then
+	echo "  REVIEW     - unusual things that are often legitimate. Have an admin look"
+	echo "               at each one; if unsure, compare with the HA peer or another"
+	echo "               box on the same build."
+fi
+if [ "$nbad" -gt 0 ] || [ "$sk" -gt 0 ] || [ "$nerr" -gt 0 ]; then
+	echo "  INCOMPLETE - some logs or folders could not be read (see WARNING above), so"
+	echo "               findings there may be missing. Fix that and run the scan again."
+fi
+if [ $((h + a + c)) -eq 0 ]; then
+	echo "  None of the known signs of attack or compromise were found. That does not"
+	echo "  prove the box is clean - only these specific indicators were checked."
+fi
 if [ "$nbad" -gt 0 ] || [ "$sk" -gt 0 ] || [ "$nerr" -gt 0 ]; then exit 2; fi
 [ $((h + a + c)) -gt 0 ] && exit 1
 exit 0
