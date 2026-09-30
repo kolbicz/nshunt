@@ -11,7 +11,7 @@ grep -q "$(printf '\r')" "$0" && printf '%s\n' "ERROR: $0 has Windows line endin
 # Exit code: 0 = no findings, 1 = findings, 2 = scan incomplete (unreadable
 # logs or a check that crashed) - never trust "no findings" with exit 2.
 
-VERSION=1.1
+VERSION=1.2
 R=${NSHUNT_ROOT:-}   # test hook: prefix for all paths
 WEB="/var/netscaler/logon /var/netscaler/gui /netscaler/ns_gui /var/vpn"
 
@@ -34,6 +34,13 @@ finding() {
 	echo "[$1] $2"
 	sed 's/^/       /' "$3"
 }
+# alogs: every web access log (httpaccess.log, httpaccess-vpn.log, ...) and rotation, unzipped
+alogs() {
+	for f in "$R"/var/log/httpaccess*.log "$R"/var/log/httpaccess*.log.*; do
+		[ -f "$f" ] || continue
+		case "$f" in *.gz) gzip -dc "$f" ;; *) cat "$f" ;; esac
+	done 2>/dev/null
+}
 # logs [name]: every rotation of /var/log/<name> (default ns.log), unzipped
 logs() {
 	for f in "$R/var/log/${1:-ns.log}" "$R/var/log/${1:-ns.log}".*; do
@@ -47,7 +54,7 @@ echo "NetScaler quick hunt $VERSION - $(hostname) - $(date '+%Y-%m-%d %H:%M')"
 # A corrupt or unreadable log must not look like "no findings": test every
 # log up front and report the scan as incomplete if any cannot be read.
 : > "$T/badlogs"
-for f in "$R"/var/log/ns.log "$R"/var/log/ns.log.* "$R"/var/log/httpaccess.log "$R"/var/log/httpaccess.log.*; do
+for f in "$R"/var/log/ns.log "$R"/var/log/ns.log.* "$R"/var/log/httpaccess*.log "$R"/var/log/httpaccess*.log.*; do
 	[ -f "$f" ] || continue
 	case "$f" in
 	*.gz) gzip -t "$f" 2>/dev/null || echo "${f#$R}" >> "$T/badlogs" ;;
@@ -84,16 +91,26 @@ done
 
 # --- 2. Shell commands injected through the VPN login (2026 attacks) -------
 (
-	logs | grep 'LOGIN_FAILED' | grep -E 'pitboss|`|\$\{IFS\}|\$\(|\|[ ]*sh' |
+	# Failed logins carry the client IP. The same payload is also logged as
+	# "sending login req to aaad for <...>"; those lines have no IP but catch
+	# attempts that never produced a LOGIN_FAILED line.
+	logs | grep -E 'LOGIN_FAILED|sending login req to aaad for <' | grep -E 'pitboss|`|\$\{IFS\}|\$\(|\|[ ]*sh' |
 	awk '{
-		ip = "?"; if (match($0, /Client_ip [0-9a-fA-F.:]+/)) ip = substr($0, RSTART + 10, RLENGTH - 10)
 		d = ""; if (match($0, /[0-9][0-9]\/[0-9][0-9]\/[0-9][0-9][0-9][0-9]:[0-9][0-9]:[0-9][0-9]/)) {
 			s = substr($0, RSTART, RLENGTH)
 			d = substr(s, 7, 4) "-" substr(s, 1, 2) "-" substr(s, 4, 2) " " substr(s, 12, 5)
 		}
-		u = $0; sub(/.*LOGIN_FAILED [0-9]+ [0-9]+ : +User /, "", u); sub(/ - Client_ip.*/, "", u)
-		print ip "\t" d "\t" u
-	}' | sort -t "$(printf '\t')" -k2 > "$T/att"
+		if (/LOGIN_FAILED/) {
+			ip = "?"; if (match($0, /Client_ip [0-9a-fA-F.:]+/)) ip = substr($0, RSTART + 10, RLENGTH - 10)
+			u = $0; sub(/.*LOGIN_FAILED [0-9]+ [0-9]+ : +User /, "", u); sub(/ - Client_ip.*/, "", u)
+			lf[u] = 1; print ip "\t" d "\t" u
+		} else {
+			u = $0; sub(/.*sending login req to aaad for </, "", u); sub(/>, factor.*/, "", u)
+			n++; ad[n] = d; au[n] = u
+		}
+	}
+	END { for (i = 1; i <= n; i++) if (!(au[i] in lf)) print "no IP logged\t" ad[i] "\t" au[i] }' |
+		sort -t "$(printf '\t')" -k2 > "$T/att"
 
 	if [ -s "$T/att" ]; then
 		awk -F '\t' '
@@ -105,8 +122,14 @@ done
 		# Files the attacker tried to create in web folders: do they exist now?
 		cut -f3 "$T/att" | grep -oE '/(var/netscaler/(logon|gui)|netscaler/ns_gui|var/vpn)/[^] `;$|>"<'"'"'()[]+' |
 			sort -u > "$T/drop"
-		: > "$T/exists"
+		: > "$T/exists"; : > "$T/dl"
 		if [ -s "$T/drop" ]; then
+			# URL each file would be served under (logon -> /logon/..., GUI -> /...)
+			sed -n -e 's|^/var/netscaler/logon/|/logon/|p' -e 's|^/netscaler/ns_gui/|/|p' \
+				-e 's|^/var/netscaler/gui/|/|p' "$T/drop" > "$T/dropurl"
+			# one pass over the access logs; only lines naming one of those URLs
+			: > "$T/hits"
+			[ -s "$T/dropurl" ] && alogs | grep -F -f "$T/dropurl" > "$T/hits"
 			echo "Files the attacks tried to create:" >> "$T/f"
 			while IFS= read -r p; do
 				if [ -e "$R$p" ]; then
@@ -114,6 +137,25 @@ done
 				else
 					echo "  not present now (never created, or removed since): $p" >> "$T/f"
 				fi
+				u=$(printf '%s\n' "$p" | sed -n -e 's|^/var/netscaler/logon/|/logon/|p' \
+					-e 's|^/netscaler/ns_gui/|/|p' -e 's|^/var/netscaler/gui/|/|p')
+				[ -n "$u" ] || continue
+				# "GET /url HTTP/1.1" status size - count statuses, keep every 2xx
+				awk -v u="$u" '
+					match($0, /"[A-Z]+ [^ "]+ [^"]*" [0-9]+ [0-9-]+/) {
+						split(substr($0, RSTART, RLENGTH), a, " "); path = a[2]; sub(/\?.*/, "", path)
+						if (path != u) next
+						if (!(a[4] in n)) order[++k] = a[4]
+						n[a[4]]++
+						if (a[4] ~ /^2/) { d = ""
+							if (match($0, /\[[0-9]+\/[A-Za-z]+\/[0-9:]+ [-+][0-9]+\]/)) d = substr($0, RSTART + 1, RLENGTH - 2)
+							print "DL\t" d "  " $1 "  status " a[4] ", " a[5] " bytes  " u }
+					}
+					END { if (k) { s = ""; for (i = 1; i <= k; i++) s = s (i > 1 ? ", " : "") "status " order[i] " x" n[order[i]]
+						print "SUM\t    web requests for " u ": " s }
+						else print "SUM\t    no web requests for " u " in the access logs still on the box" }' "$T/hits" > "$T/req"
+				awk 'sub(/^SUM\t/, "")' "$T/req" >> "$T/f"
+				awk 'sub(/^DL\t/, "")' "$T/req" >> "$T/dl"
 			done < "$T/drop"
 		fi
 		cut -f3 "$T/att" | grep -oE 'https?://[^ `;$|"<>'"'"'()]+' | sort -u > "$T/url"
@@ -121,8 +163,29 @@ done
 			echo "Check firewall logs for connections from the NetScaler to:" >> "$T/f"
 			sed 's/^/  /' "$T/url" >> "$T/f"
 		fi
+		# Everything else these IPs did on the web server (recon, downloads)
+		cut -f1 "$T/att" | grep -vE '^(\?|no IP logged)$' | sort -u > "$T/ips"
+		if [ -s "$T/ips" ]; then
+			alogs | awk '
+				NR == FNR { want[$1] = 1; order[++k] = $1; next }
+				($1 in want) && match($0, /"[A-Z]+ [^ "]+ [^"]*" [0-9]+ [0-9-]+/) {
+					split(substr($0, RSTART, RLENGTH), a, " "); ip = $1; st = a[4]; path = a[2]; sub(/\?.*/, "", path)
+					n[ip]++; if (!((ip, st) in c)) sts[ip] = sts[ip] " " st; c[ip, st]++
+					if (st ~ /^2/ && !((ip, path) in ok)) { ok[ip, path] = 1; if (m[ip]++ < 5) oks[ip] = oks[ip] "\n    " st " " path }
+				}
+				END { for (i = 1; i <= k; i++) { ip = order[i]; if (!n[ip]) continue
+					j = split(substr(sts[ip], 2), L, " "); s = ""
+					for (x = 1; x <= j; x++) s = s (x > 1 ? ", " : "") L[x] " x" c[ip, L[x]]
+					printf "  %-16s %d request(s): %s%s%s\n", ip, n[ip], s, (m[ip] ? "\n    answered 2xx (login page loads and login posts are normal, anything else is not):" : ""), oks[ip]
+					if (m[ip] > 5) printf "    ... %d more\n", m[ip] - 5 } }' "$T/ips" - > "$T/web"
+			if [ -s "$T/web" ]; then
+				echo "Web requests from these IPs (access logs still on the box):" >> "$T/f"
+				cat "$T/web" >> "$T/f"
+			fi
+		fi
 		finding ATTACK "Shell commands sent in the VPN login name (command injection)" "$T/f"
 		finding HIGH "A file the attackers tried to create EXISTS - the attack may have worked" "$T/exists"
+		finding HIGH "A file the attackers tried to create was DOWNLOADED from the web server - the attack worked" "$T/dl"
 	fi
 ) || { echo "[SKIPPED] check 2 (Shell commands injected through the VPN login (2026 attacks)) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
@@ -343,12 +406,12 @@ done
 				"$(printf '%s' "$x" | openssl base64 -d -A 2>/dev/null | tr -c '[:print:]' '.' | cut -c1-150)"
 		done; }
 
-	logs httpaccess.log | grep -E '/[0-9A-Fa-f]{6,}\.(ico|sig)|nsginstaller\.deb' > "$T/acc"
+	alogs | grep -E '/[0-9A-Fa-f]{6,}\.(ico|sig)|nsginstaller\.deb' > "$T/acc"
 	cap "$T/acc" > "$T/f"
 	[ -s "$T/f" ] && echo "(WHIPSHOT answers 404 - a 404 with a large response size means the shell ran)" >> "$T/f"
-	finding ATTACK "Requests for web shell URLs (<hex>.ico / .sig) in the web access log" "$T/f"
+	finding ATTACK "Requests for web shell URLs (<hex>.ico / .sig) in the web access logs" "$T/f"
 
-	logs httpaccess.log | grep -E '"INDEX:[A-Za-z0-9+/=]{8,}|"[A-Za-z0-9+/]{40,}={0,2}"[[:space:]]*$' > "$T/ua"
+	alogs | grep -E '"INDEX:[A-Za-z0-9+/=]{8,}|"[A-Za-z0-9+/]{40,}={0,2}"[[:space:]]*$' > "$T/ua"
 	cap "$T/ua" > "$T/f"
 	grep -oE '"INDEX:[A-Za-z0-9+/=]{8,}|"[A-Za-z0-9+/]{40,}={0,2}"[[:space:]]*$' "$T/ua" |
 		sed -e 's/^"INDEX://' -e 's/[" ]//g' | decode >> "$T/f"
@@ -368,7 +431,7 @@ done
 (
 	# Published by Mandiant, GreyNoise, Lupovis and the CVE-2025/2026 advisories.
 	IPS='45\.61\.136\.143|66\.55\.159\.67|149\.248\.21\.5|144\.126\.221\.237|107\.172\.221\.57|172\.98\.178\.104|88\.218\.105\.254|149\.28\.121\.199|80\.240\.22\.229|78\.135\.96\.136|149\.28\.29\.221|89\.36\.231\.206|91\.195\.240\.123|143\.198\.7\.94|157\.254\.167\.12|149\.104\.78\.141|138\.199\.200\.90'
-	{ logs; logs httpaccess.log; } | grep -oE "(^|[^0-9.])($IPS)([^0-9]|\$)" |
+	{ logs; alogs; } | grep -oE "(^|[^0-9.])($IPS)([^0-9]|\$)" |
 		grep -oE "$IPS" | sort | uniq -c | awk '{ printf "%-16s %d log line(s)\n", $2, $1 }' > "$T/f"
 	finding ATTACK "Known attacker IP addresses in the logs" "$T/f"
 	: > "$T/f2"
@@ -381,7 +444,7 @@ done
 # --- Summary ---------------------------------------------------------------
 nb=$(find "$R/var/vpn/bookmark" -type f -name '*.xml' 2>/dev/null | wc -l | tr -d ' ')
 nl=$(ls "$R"/var/log/ns.log* 2>/dev/null | wc -l | tr -d ' ')
-na=$(ls "$R"/var/log/httpaccess.log* 2>/dev/null | wc -l | tr -d ' ')
+na=$(ls "$R"/var/log/httpaccess*.log* 2>/dev/null | wc -l | tr -d ' ')
 old=$(ls "$R"/var/log/ns.log.*.gz 2>/dev/null | sort -t. -k3 -n | tail -1)
 [ -n "$old" ] && old=$(gzip -dc "$old" 2>/dev/null | head -1 | awk '{ print $1, $2 }')
 h=$(grep -c '^HIGH$' "$T/count"); a=$(grep -c ATTACK "$T/count"); c=$(grep -c CHECK "$T/count")
@@ -393,7 +456,7 @@ else
 fi
 nbad=$(wc -l < "$T/badlogs" | tr -d ' '); sk=$(grep -c SKIPPED "$T/count")
 awk '!seen[$0]++' "$E" > "$E.u"; mv "$E.u" "$E"; nerr=$(wc -l < "$E" | tr -d ' ')
-echo "Scanned: $nb bookmark files in /var/vpn/bookmark, $nl ns.log files, $na httpaccess.log files ($nbad unreadable)."
+echo "Scanned: $nb bookmark files in /var/vpn/bookmark, $nl ns.log files, $na web access log files ($nbad unreadable)."
 if [ "$nbad" -gt 0 ] || [ "$sk" -gt 0 ] || [ "$nerr" -gt 0 ]; then
 	echo "WARNING: scan INCOMPLETE - $nbad unreadable log(s), $sk crashed check(s), $nerr file system error(s)."
 	[ "$nbad" -gt 0 ] && sed 's/^/  unreadable: /' "$T/badlogs"
