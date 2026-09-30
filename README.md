@@ -49,7 +49,7 @@ Each finding is labelled:
 Example:
 
 ```
-NetScaler quick hunt - ns01 - 2026-09-30 14:43
+NetScaler quick hunt 1.1 - ns01 - 2026-09-30 14:43
 
 [HIGH] CVE-2019-19781 exploit files: this box was exploited (Jan 2020 wave)
        Jan 11 2020 16:04  /var/vpn/bookmark/pwnpzi1337.xml  (exploit file name)
@@ -63,7 +63,7 @@ NetScaler quick hunt - ns01 - 2026-09-30 14:43
          http://203.0.113.10:8899/s
 
 RESULT: 1 HIGH, 1 ATTACK, 0 CHECK.
-Scanned: 24 bookmark files in /var/vpn/bookmark, 26 ns.log files (0 unreadable).
+Scanned: 24 bookmark files in /var/vpn/bookmark, 26 ns.log files, 5 httpaccess.log files (0 unreadable).
 Log checks only see logs still on the box (back to Sep 29); older attacks need your syslog server.
 ```
 
@@ -93,11 +93,12 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
 3. **Path-traversal probes carrying commands** - requests the NetScaler logged
    and blocked as `Path traversal detected` that contained `curl`, `wget` or
    command separators, per source IP.
-4. **Web shells** - PHP, Perl, Python or shell scripts, or `<?php` code inside
+4. **Web shells** - PHP, Perl, Python or shell scripts, or `<?php` / `<?=` code inside
    other files, in web folders outside the stock admin UI.
 5. **Files written by the web server** - files owned by `nobody` in
    `/var/netscaler/logon`, `/var/netscaler/gui` and `/netscaler/ns_gui`.
-6. **Hidden files** in web folders.
+6. **Hidden files** in web folders. The published web shell name
+   `.ctxs.receiver` is `HIGH`.
 7. **Credential stealers in the login page** - JavaScript that contains an
    external URL next to code that captures or sends data (`password`, `fetch(`,
    `XMLHttpRequest`, `sendBeacon`, `atob`, `new Image`, ...), anywhere in the
@@ -108,11 +109,31 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
 9. **User crontabs** in `/var/cron/tabs`.
 10. **Unknown programs in temp folders** (`/tmp`, `/var/tmp`, `/var/nstmp`),
     excluding the NIC firmware tools and caches that NetScaler upgrades leave there.
+11. **Web server config** (`/etc/httpd.conf`, `/flash/nsconfig/httpd.conf`) -
+    PHP handlers for non-PHP files such as `.deb` or `.sig`, and aliases that map
+    an image or CSS URL (e.g. `/vpn/media/<hex>.ico`, `receiver.min.css`) onto a
+    hidden, `.sig` or `.deb` file are `HIGH` (WHIPSHOT persistence).
+    `php_flag engine on` and commented-out protection lines are `CHECK`.
+12. **Startup scripts** (`rc.netscaler`, `nsbefore.sh`, `nsafter.sh`) that run
+    Python, base64 loaders, downloads or `chmod +s` at boot.
+13. **Fake `.deb` packages** - `.deb` files in web folders that are not real
+    packages (WHIPSHOT is a PHP web shell disguised as a `.deb`).
+14. **Setuid shells** - `/bin/sh` or another shell or interpreter with the
+    setuid/setgid bit, which gives web shells root.
+15. **SLAPSHOT tunnel** - `/tmp/.uxdport`, `/tmp/.uxdlock` and running Python
+    processes that execute base64 payloads.
+16. **Web access log** (`httpaccess.log*`) - requests for `<hex>.ico` / `.sig`
+    web shell URLs, and `INDEX:<base64>` or base64-only User-Agents, shown
+    decoded.
+17. **Crash dumps** from the last 14 days in `/var/core` and `/var/crash` - failed
+    exploits can crash the packet engine (NSPPE).
+18. **Known attacker IP addresses** published by Mandiant, GreyNoise and
+    Lupovis, in `ns.log*` and `httpaccess.log*`, and in current connections.
 
 ## Limitations
 
-- **Logs rotate quickly.** The log checks only see the `ns.log*` files still on
-  the appliance, often just a day or two. Search your syslog server or SIEM for
+- **Logs rotate quickly.** The log checks only see the `ns.log*` and
+  `httpaccess.log*` files still on the appliance, often just a day or two. Search your syslog server or SIEM for
   older attacks; the script prints how far back the local logs go.
 - **A missing file does not prove an attack failed** - the attacker may have
   removed it. The script says "not present now", not "failed".
