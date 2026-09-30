@@ -49,7 +49,7 @@ Each finding is labelled:
 Example:
 
 ```
-NetScaler quick hunt 1.2 - ns01 - 2026-09-30 14:43
+NetScaler quick hunt 1.3 - ns01 - 2026-09-30 14:43
 
 [HIGH] CVE-2019-19781 exploit files: this box was exploited (Jan 2020 wave)
        Jan 11 2020 16:04  /var/vpn/bookmark/pwnpzi1337.xml  (exploit file name)
@@ -87,18 +87,24 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
    not proof. Files owned by `nobody` in `/netscaler/portal/templates` are `HIGH`.
 2. **Command injection through the VPN login** - failed logins and
    authentication requests in `ns.log*` whose user name contains shell syntax
-   (`` ` ``, `${IFS}`, `$(`, `| sh`, `pitboss`). Summarised per attacker IP with
-   the number of attempts, time range and payload, plus everything those IPs
-   requested from the web server (status codes and successful URLs). For files the payload tried to create in a web folder it
-   reports whether they exist now (`HIGH` if so) and how the web server answered
-   requests for them. A successful (`2xx`) download is `HIGH` - for example an
-   attack that packs `/flash/nsconfig` into a file in the login page and then
-   downloads it. It also lists download URLs to look for in your firewall logs.
+   (`` ` ``, `${IFS}` also URL-encoded, `$(`, `| sh`) or a fake packet-engine
+   message (`pitboss`, `...died NSPPE;`, `missed too many heartbeats`).
+   Summarised per attacker IP with the number of attempts, time range and
+   payload, plus everything those IPs requested from the web server (status
+   codes and successful URLs). For files the payload tried to create in a web
+   folder it reports whether they exist now (`HIGH` if so) and how the web
+   server answered requests for them. A successful (`2xx`) download after the
+   first attempt is `HIGH` - for example an attack that packs `/flash/nsconfig`
+   into a file in the login page and then downloads it. Successes before the
+   attempt are only counted, not reported as an attack. It also lists download URLs to look for in your
+   firewall logs. The same payload text copied into `/var/log/messages` is
+   reported too.
 3. **Path-traversal probes carrying commands** - requests the NetScaler logged
    and blocked as `Path traversal detected` that contained `curl`, `wget` or
    command separators, per source IP.
-4. **Web shells** - PHP, Perl, Python or shell scripts, or `<?php` / `<?=` code inside
-   other files, in web folders outside the stock admin UI.
+4. **Web shells** - PHP, Perl, Python or shell scripts, or `<?php` / `<?=` code
+   inside other files, in web folders outside the stock admin UI, and
+   `passthru(` / `NSC_TASS` in `LogonPoint/custom` and `/var/vpn`.
 5. **Files written by the web server** - files owned by `nobody` in
    `/var/netscaler/logon`, `/var/netscaler/gui` and `/netscaler/ns_gui`.
 6. **Hidden files** in web folders. The published web shell name
@@ -110,7 +116,8 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
    Stock Citrix code only talks to `localhost` or relative paths and is not flagged.
 8. **Unknown setuid/setgid programs** outside the standard system folders and
    the NetScaler's own `ping`/`traceroute`.
-9. **User crontabs** in `/var/cron/tabs`.
+9. **Crontabs** - user crontabs in `/var/cron/tabs`, and `/etc/crontab` lines
+   that download from anywhere but the appliance itself.
 10. **Unknown programs in temp folders** (`/tmp`, `/var/tmp`, `/var/nstmp`),
     excluding the NIC firmware tools and caches that NetScaler upgrades leave there.
 11. **Web server config** (`/etc/httpd.conf`, `/flash/nsconfig/httpd.conf`) -
@@ -119,20 +126,43 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     hidden, `.sig` or `.deb` file are `HIGH` (WHIPSHOT persistence).
     `php_flag engine on` and commented-out protection lines are `CHECK`.
 12. **Startup scripts** (`rc.netscaler`, `nsbefore.sh`, `nsafter.sh`) that run
-    Python, base64 loaders, downloads or `chmod +s` at boot.
-13. **Fake `.deb` packages** - `.deb` files in web folders that are not real
-    packages (WHIPSHOT is a PHP web shell disguised as a `.deb`).
+    Python, base64 loaders, downloads or `chmod +s` at boot, and decoders,
+    Python one-liners or reversed path strings in `ns.conf` and `/etc/rc`.
+13. **Disguised files** - `.deb` files in web folders that are not real packages
+    (WHIPSHOT is a PHP web shell disguised as a `.deb`), and scripts in the
+    Gateway client-package and media folders, which should only hold packages
+    and images.
 14. **Setuid shells** - `/bin/sh` or another shell or interpreter with the
     setuid/setgid bit, which gives web shells root.
-15. **SLAPSHOT tunnel** - `/tmp/.uxdport`, `/tmp/.uxdlock` and running Python
-    processes that execute base64 payloads.
-16. **Web access logs** (`httpaccess*.log*`, including the Gateway's `httpaccess-vpn.log`) - requests for `<hex>.ico` / `.sig`
-    web shell URLs, and `INDEX:<base64>` or base64-only User-Agents, shown
-    decoded.
-17. **Crash dumps** from the last 14 days in `/var/core` and `/var/crash` - failed
-    exploits can crash the packet engine (NSPPE).
-18. **Known attacker IP addresses** published by Mandiant, GreyNoise and
-    Lupovis, in `ns.log*` and the web access logs, and in current connections.
+15. **SLAPSHOT tunnel and payload processes** - `/tmp/.uxdport`,
+    `/tmp/.uxdlock`, Python processes that execute base64 payloads, and running
+    `lula`, `update_c*.pl` or `/.x` processes.
+16. **Web access logs** (`httpaccess*.log*`, including the Gateway's
+    `httpaccess-vpn.log`) - requests for `<hex>.ico` / `.sig` web shell URLs, and
+    `INDEX:<base64>` or base64-only User-Agents, shown decoded.
+17. **Packet engine crashes** - crash dumps and crash or failed-DTLS-handshake
+    log lines from the last 14 days, in `/var/core`, `/var/crash`, `ns.log*` and
+    `/var/log/messages*` (CVE-2026-88772 exploits crash the packet engine).
+18. **Known attacker IP addresses** published by Mandiant, GreyNoise, Lupovis
+    and Gotham Technology Group, in `ns.log*`, `/var/log/messages*` and the web
+    access logs, and in current connections.
+19. **Files written by the published exploit payloads** - known dropped file
+    names (`/.x`, `/s`, `lula`, `/var/1.py`, `update_c*.pl`, `wtw*`,
+    `themes/wt88771*`, `nx_verify.html`, `c88771*`, `xua.html`, `/var/tmp/sh`,
+    `insight-new.js`, `admin_ui/e.txt` / `log.txt`), small files containing the
+    output of `id`, and gzip, zip or tar archives disguised as web files - how a
+    stolen `/flash/nsconfig` is staged for download. Only name, size and date are
+    shown, never the contents.
+20. **Exploit, scanner and probe strings** in the web and error logs - canary
+    and scanner strings (`ns-88771-poc`, `PoCbit`, `NX-CVE-OK`, `httpworkbench`),
+    requests for the `.ctxs.receiver` web shell, 1-byte `nsepa.deb` probes,
+    `vp_probe_nonexist`, `scanner-probe` logins, and errors for package or icon
+    files in Gateway folders, each with its source IPs. HeadlessChrome requests
+    are `CHECK`.
+21. **Shell history** (`sh.log*`, `bash.log*`) - commands that read LDAP
+    credentials or keys (`ldapsearch`, `openssl s_client`, `F1.key` / `F2.key`,
+    `/flash/nsconfig/keys`). Searches run with `grep` and friends, by you or by
+    other scanners, are ignored.
 
 ## Limitations
 
@@ -159,6 +189,15 @@ mounted file system instead of the live appliance:
 ```sh
 NSHUNT_ROOT=/mnt/netscaler-image sh nshunt.sh
 ```
+
+## Credits
+
+Many indicators come from public research by Mandiant / Google Threat
+Intelligence, GreyNoise, watchTowr, Lupovis, CERT-EU and Kevin Beaumont. The
+checks added in 1.3 are based on the indicator list of Thomas Poppelgaard's
+[netscaler-ctx697096-checker](https://github.com/ThomasPoppelgaard/netscaler-ctx697096-checker),
+which includes indicators from Gotham Technology Group and Manuel Winkel
+(Deyda Consulting).
 
 ## License
 
