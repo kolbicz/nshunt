@@ -18,7 +18,7 @@ grep -q "$(printf '\r')" "$0" && printf '%s\n' "ERROR: $0 has Windows line endin
 # logs or a check that crashed) or the report could not be saved - never
 # trust "no findings" with exit 2.
 
-VERSION=1.9
+VERSION=2.0
 
 # anonymise <host>: stdin report -> copy that can leave the organisation.
 # Masks the host name, internal IPs and the box's own addresses, public IPs
@@ -85,7 +85,7 @@ anonymise() {
 		return out s
 	}
 	NR == 1 { print "# nshunt report, ANONYMISED FOR SHARING - read it before you send it. Masked: host name,"
-	          print "# internal IPs, user names, theme and EPA names, internal domains, shell-history arguments."
+	          print "# internal IPs, user, theme, EPA and partition names, internal domains, shell-history arguments."
 	          print "# Kept: attack sources and payloads, file paths (check them), dates, build, results." }
 	/^\[(COMPROMISE|ATTEMPT|REVIEW)\]/ { lvl = substr($1, 2, length($1) - 2) }
 	/^[^ \t\[]/ && !/^\[/ { lvl = "" }
@@ -110,6 +110,8 @@ anonymise() {
 		l = swap(l, "/themes/[^/]+/", 8, 1, "THEME", "^(Default|RfWebUI|X1|Greenbubble|Caxton|EULA)$")
 		l = swap(l, "epaAction [^ ]+", 10, 0, "EPA", "")
 		l = swap(l, "vserver [^ ]+", 8, 0, "VSERVER", "")
+		l = swap(l, "/partitions/[^/ ]+/", 12, 1, "PARTITION", "")
+		l = swap(l, "admin partition [^ )]+", 16, 0, "PARTITION", "")
 		l = swap(l, "policylabel [^ ]+", 12, 0, "LABEL", "")
 		l = swap(l, "-policy [^ \"]+", 8, 0, "POLICY", "")
 		l = swap(l, "-policyName [^ \"]+", 12, 0, "POLICY", "")
@@ -299,6 +301,7 @@ if [ -n "$BUILD" ]; then
 	13.1) if [ "$BMA" -eq 37 ]; then { ge 37 279 && FIXED=yes; } || FIXED=no
 	      elif ge 64 23; then FIXED=yes; else FIXED=no; fi ;;
 	13.0|12.*|11.*|10.*) FIXED=no ;;   # end of life, no fix
+	15.1) FIXED=no; PREVIEW=1 ;;        # Technology Preview: vulnerable, fix pending (bulletin)
 	*)    FIXED=unknown ;;              # a release this script does not know
 	esac
 	# When did the fixed build start RUNNING? Installing it does not protect
@@ -336,7 +339,11 @@ if [ -n "$BUILD" ]; then
 	     elif [ -n "$BOOTED" ]; then
 	         echo "       running since the last boot, $BOOTED (install date not found)"
 	     fi ;;
-	no)  echo "Build: $REL-$BMA.$BMI - VULNERABLE to CVE-2026-88771/88772 - upgrade now (fixed: 14.1-73.37, 13.1-64.24)" ;;
+	no)  if [ -n "${PREVIEW:-}" ]; then
+	         echo "Build: $REL-$BMA.$BMI - Technology Preview, VULNERABLE to CVE-2026-88771/88772 - no fix yet; not for production"
+	     else
+	         echo "Build: $REL-$BMA.$BMI - VULNERABLE to CVE-2026-88771/88772 - upgrade now (fixed: 14.1-73.37, 13.1-64.24)"
+	     fi ;;
 	*)   echo "Build: $REL-$BMA.$BMI - fix status unknown (FIPS numbering or a release this script does not know) - compare with the Citrix bulletin CTX697096" ;;
 	esac
 else
@@ -1084,11 +1091,12 @@ done
 	set -- $(dirs "/var/core /var/crash")
 	: > "$T/f"
 	[ $# -gt 0 ] && find "$@" -type f -mtime -14 ! -name bounds ! -name minfree ! -path '*/.ns-cache/*' 2>>"$E" | list > "$T/f"
-	# packet engine crashes and failed DTLS handshakes (CVE-2026-88772, Mandiant)
+	# Packet engine crashes / DTLS failures (CVE-2026-88772, Mandiant), plus
+	# nsaaad failures and Pitboss reboots. AAA crashes alone do not prove exploitation.
 	# Only lines from the last 14 days, sorted by time across all rotations.
 	# ns.log lines carry a GMT date; syslog-only lines (messages) have no year.
 	{ logs; logs messages; } | grep -v 'shell_command=' |
-		grep -E 'ClientVersion DTLSv1\.0.*Handshake failure-Internal Error|exit with orphan rings|NOT restarting NSPPE|\(NSPPE-[0-9]+\),( jid [0-9]+,)? uid [0-9]+: exited on signal' |
+		grep -E 'ClientVersion DTLSv1\.0.*Handshake failure-Internal Error|exit with orphan rings|NOT restarting NSPPE|\(NSPPE-[0-9]+\),( jid [0-9]+,)? uid [0-9]+: exited on signal|nsaaad.*(unexpectedly died|EXITED|SIGNALED|maximum number of restarts)|Pitboss declaring system failure:.*nsaaad|All monitored processes have exited, rebooting' |
 		awk -v now="$NOW" "$AWKTIME"'
 		BEGIN { Y = substr(now, 1, 4) + 0
 			N = mins(Y, substr(now, 5, 2) + 0, substr(now, 7, 2) + 0, substr(now, 9, 2) + 0, substr(now, 11, 2) + 0) }
@@ -1101,10 +1109,10 @@ done
 			}
 			if (t >= N - 14 * 1440) printf "%012d\t%s\n", t, $0 }' | sort -n | cut -f2- > "$T/crash"
 	if [ -s "$T/crash" ]; then
-		echo "$(wc -l < "$T/crash" | tr -d ' ') packet engine crash / DTLS failure log line(s) in the last 14 days, newest:" >> "$T/f"
+		echo "$(wc -l < "$T/crash" | tr -d ' ') process crash / DTLS failure / Pitboss reboot log line(s) in the last 14 days, newest:" >> "$T/f"
 		tail -3 "$T/crash" | cut -c1-200 | sed 's/^/  /' >> "$T/f"
 	fi
-	finding REVIEW "Packet engine and other process crashes (core dumps, crash log lines) in the last 14 days - CVE-2026-88772 exploits crash the packet engine" "$T/f"
+	finding REVIEW "Packet engine and other process crashes (core dumps, nsaaad failures, Pitboss reboots) in the last 14 days - investigate; crashes alone do not prove exploitation" "$T/f"
 	# A failed DTLS handshake followed within 10 minutes by a packet engine crash
 	# is how successful CVE-2026-88772 exploitation looked (Mandiant). Both log
 	# files start with the box's local syslog time, so compare that.
@@ -1117,7 +1125,8 @@ done
 		awk -F '\t' '
 		{ t = $1 + 0; sub(/^[^\t]*\t/, "") }
 		/Handshake failure-Internal Error/ { dt = t; dl = $0; next }
-		dl != "" && t - dt <= 10 && !(dl in shown) { shown[dl] = 1; print dl; print "  -> " $0 }' | cut -c1-200 > "$T/f2"
+		/exit with orphan rings|NOT restarting NSPPE|\(NSPPE-[0-9]+\),( jid [0-9]+,)? uid [0-9]+: exited on signal/ &&
+		    dl != "" && t - dt <= 10 && !(dl in shown) { shown[dl] = 1; print dl; print "  -> " $0 }' | cut -c1-200 > "$T/f2"
 	finding COMPROMISE "Failed DTLS handshake followed by a packet engine crash - likely successful CVE-2026-88772 exploitation" "$T/f2"
 ) || { echo "[SKIPPED] check 17 (Recent crashes) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
@@ -1195,7 +1204,7 @@ done
 	# PHP-carrying package is reported by check 13 from its content.
 	: > "$T/f5"
 	for d in /var/netscaler/gui/vpn/scripts/linux /netscaler/ns_gui/vpn/scripts/linux; do
-		[ -d "$R$d" ] && find "$R$d" -maxdepth 1 -type f \( \( -name 'nsginstaller*.deb' ! -name 'nsginstaller64.deb' \) -o -name 'nsgclient18.deb' \
+		[ -d "$R$d" ] && find "$R$d" -maxdepth 1 -type f \( \( -name 'nsginstaller*.deb' ! -name 'nsginstaller64.deb' \) -o -name 'nsgclient18.deb' -o -name 'nsgclient18_32.deb' \
 			-o -name 'nsgser18.deb' -o -name 'nsgsupport.deb' -o -name 'nsgpackage64.deb' -o -name 'nsgbuild.deb' \
 			-o -name 'nsg64.deb' \) 2>>"$E"
 	done | list | sed 's/$/  (a name the web shells used - compare its SHA-256 with a clean box)/' > "$T/f5"
@@ -1284,7 +1293,7 @@ done
 	# a short archive URL (Rapid7) and package names that real clients may use too
 	{
 		alogs | grep -E '"[A-Z]+ /vpn/c[ ?]' | sum "requests for /vpn/c (a config archive was staged there)"
-		alogs | grep -E '"[A-Z]+ /vpns?/scripts/linux/(nsgclient18|nsg64)\.deb[ ?]' | sum "requests for nsgclient18.deb / nsg64.deb (web shell names, also real package names)"
+		alogs | grep -E '"[A-Z]+ /vpns?/scripts/linux/(nsgclient18|nsgclient18_32|nsg64)\.deb[ ?]' | sum "requests for nsgclient18[_32].deb / nsg64.deb (web shell names, also real package names)"
 	} > "$T/f5"
 	finding REVIEW "Requests for files the attackers staged or used - check status, size and client" "$T/f5"
 	# PHP errors raised while running a file with a non-PHP extension: PHP
@@ -1489,6 +1498,61 @@ done
 	finding REVIEW "PHP / XHTML files under /var/netscaler outside the GUI - compare with a clean box on the same build" "$T/f2"
 ) || { echo "[SKIPPED] check 23 (Known web shells by hash and code) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
+# --- 24. CVE-2026-88778: Enhanced ISN Generation (a config change) ---------
+(
+	# TCP initial sequence numbers can be predicted unless Enhanced ISN
+	# Generation is enabled - the upgrade alone does not fix it. It applies when
+	# a TCP-type virtual server exists, and is set per admin partition. Only the
+	# saved config is read: run "save ns config" first if you changed it live.
+	: > "$T/f"
+	types='HTTP|SSL|SSL_BRIDGE|TCP|SSL_TCP|FTP|NNTP|RTSP|RDP|DNS_TCP|DOT|SIP_TCP|SIP_SSL|DIAMETER|SSL_DIAMETER|MYSQL|MSSQL|ORACLE|SMPP|MQTT|MQTT_TLS|MONGO|MONGO_TLS|PROXY|SSL_PROXY|USER_TCP|USER_SSL_TCP'
+	for c in "$R/flash/nsconfig/ns.conf" "$R"/flash/nsconfig/partitions/*/ns.conf; do
+		[ -f "$c" ] || continue
+		# CLI names may be unquoted, double-quoted, or single-quoted.
+		grep -qiE "^add [a-z]+ vserver (\"[^\"]+\"|'[^']+'|[^\"'[:space:]]+) ($types)( |\$)" "$c" 2>>"$E" || continue
+		grep -qiE '^set ns tcpParam .*-enhancedISNgeneration ENABLED' "$c" 2>>"$E" && continue
+		case "$c" in
+		*/partitions/*) p=${c%/ns.conf}; printf '%s  (admin partition %s)\n' "${c#$R}" "${p##*/}" ;;
+		*) printf '%s  (default partition)\n' "${c#$R}" ;;
+		esac
+	done > "$T/f"
+	if [ -s "$T/f" ]; then
+		{ echo "fix (in each partition listed): set ns tcpparam -enhancedISNgeneration ENABLED ; save ns config"
+		  echo "check: show ns tcpparam | grep \"Enhanced ISN Generation\""; } >> "$T/f"
+	fi
+	finding REVIEW "CVE-2026-88778: Enhanced ISN Generation is not enabled - this one needs a config change, the upgrade does not fix it" "$T/f"
+) || { echo "[SKIPPED] check 24 (Enhanced ISN Generation) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
+
+# --- 25. SAML PrefixList attack (AAA daemon crashes, Pitboss reboots) -------
+(
+	# A SAMLResponse whose PrefixList has very many entries crashes the AAA
+	# daemon (nsaaad) and Pitboss then reboots the box - reported on fixed builds
+	# too (October 2026). Crash dumps are not searched (too slow); the crashes
+	# themselves show up in check 17.
+	# SAML login (SP) without a bound responder policy that drops such
+	# requests - the Citrix support workaround until a fix ships
+	for c in "$R/flash/nsconfig/ns.conf" "$R"/flash/nsconfig/partitions/*/ns.conf; do
+		[ -f "$c" ] || continue
+		grep -qiE '^add authentication samlAction ' "$c" 2>>"$E" || continue
+		ok=""
+		for n in $(awk 'tolower($1) == "add" && tolower($2) == "responder" && tolower($3) == "policy" && /PrefixList/ { n = $4; gsub(/"/, "", n); print n }' "$c"); do
+			grep -qiE "^bind (authentication|vpn) vserver .* -policy(Name)? \"?$n\"?( |\$)" "$c" 2>>"$E" && ok=1
+		done
+		[ -n "$ok" ] && continue
+		case "$c" in
+		*/partitions/*) p=${c%/ns.conf}; printf '%s  (admin partition %s)\n' "${c#$R}" "${p##*/}" ;;
+		*) printf '%s  (default partition)\n' "${c#$R}" ;;
+		esac
+	done > "$T/f2"
+	if [ -s "$T/f2" ]; then
+		{ echo "workaround (Citrix support): a responder policy that DROPs a SAMLResponse with 15 or more"
+		  echo "PrefixList entries, bound to each authentication / VPN vserver with SAML login:"
+		  echo "  bind authentication vserver <name> -policy <policy> -type AAA_REQUEST -priority 100"
+		  echo "  bind vpn vserver <name> -policy <policy> -type AAA_REQUEST -priority 100"; } >> "$T/f2"
+	fi
+	finding REVIEW "SAML login without the PrefixList block policy - long SAML PrefixLists crash the AAA daemon and reboot the box, also on fixed builds" "$T/f2"
+) || { echo "[SKIPPED] check 25 (SAML PrefixList attack) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
+
 # --- Summary ---------------------------------------------------------------
 nb=0; for f in "$R"/var/vpn/bookmark/*.xml "$R"/var/vpn/bookmark/*/*.xml; do [ -f "$f" ] && nb=$((nb + 1)); done
 nl=$(ls "$R"/var/log/ns.log* 2>/dev/null | wc -l | tr -d ' ')
@@ -1546,18 +1610,20 @@ if [ "$a" -gt 0 ]; then
 		         echo "               before it. Check them in your SIEM."
 		     elif [ -n "$FIXUTC" ] && [ -f "$T/injections" ] && [ -n "$FIXGUESS" ]; then
 		         echo "               The fixed build was installed $FIXUTC and the injections"
-		         echo "               above came later - safe only if the box was rebooted right"
-		         echo "               after the install (until then the old build kept running)."
+		         echo "               above came later. The reboot time is unknown; the old build"
+		         echo "               kept running until reboot. Verify when the new build started."
 		     elif [ -n "$FIXUTC" ] && [ -f "$T/injections" ]; then
 		         echo "               The fixed build runs since $FIXUTC: the command"
-		         echo "               injections above all came later and could not run commands."
+		         echo "               injections above all came later. Their outcome is not established."
 		     elif [ -n "$FIXUTC" ]; then
 		         echo "               The fixed build runs since $FIXUTC: attempts"
-		         echo "               after that could not run commands."
+		         echo "               after that have no established outcome from these logs alone."
 		     else
-		         echo "               The box runs a fixed build: attempts made after it was"
-		         echo "               installed could not run commands; earlier ones could have."
-		     fi ;;
+		         echo "               The box runs a fixed build; when it started running is unknown."
+		         echo "               Check attempt times and outcomes against your SIEM."
+		     fi
+		     echo "               This build includes fixes for CVE-2026-88771/88772. Build status"
+		     echo "               does not rule out other vulnerabilities or prior compromise." ;;
 		no)  echo "               The box runs a VULNERABLE build: an attempt may have worked"
 		     echo "               without leaving a trace nshunt knows. Upgrade now." ;;
 		*)   echo "               Make sure the box runs a fixed build (show ns version)." ;;

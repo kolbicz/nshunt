@@ -63,7 +63,8 @@ the old build runs until the next boot - so this is the first boot after the
 install (`installns_state_post_reboot`), else a boot within a day of the
 install, else the install time of `/flash/ns-<build>.gz` (then the output says
 the reboot is not known). Command injection attempts from before that time are
-marked `BEFORE the fixed build was running`: only those could have run commands.
+marked `BEFORE the fixed build was running` - check those first. 15.1 is a
+Technology Preview: it is shown as vulnerable, there is no fix for it yet.
 
 The numbers in the `RESULT` line count finding blocks, i.e. kinds of evidence,
 not IP addresses or attempts. The output ends with a short "What this means"
@@ -72,7 +73,7 @@ section that explains the result in plain words.
 Example:
 
 ```
-NetScaler quick hunt 1.9 - ns01 - 2026-09-30 14:43
+NetScaler quick hunt 2.0 - ns01 - 2026-09-30 14:43
 Build: 14.1-73.37 - includes the fix for CVE-2026-88771/88772
        fixed build running since 2026-09-28 11:55 UTC (first boot after the install; installed 2026-09-28 11:48 UTC)
 
@@ -221,13 +222,15 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     `/vpn/scripts/` or `/vpn/theme/` are `COMPROMISE`: WHIPSHOT hides its output
     behind a fake 404, while the stock 404 page is a few hundred bytes. Requests
     for `<hex>.ico` / `.sig` or the known web shell package names
-    (`nsginstaller<N>`, `nsgclient18`, `nsgser18`, `nsgsupport`, `nsgpackage64`,
+    (`nsginstaller<N>`, `nsgclient18`, `nsgclient18_32`, `nsgser18`, `nsgsupport`, `nsgpackage64`,
     `nsgbuild`, `nsg64` `.deb` - not `nsginstaller64.deb`, the real Linux client
     installer), POSTs to those static paths,
     and `INDEX:<base64>` or base64-only User-Agents (shown decoded) are `ATTEMPT`.
-17. **Packet engine crashes** - crash dumps and crash or failed-DTLS-handshake
-    log lines from the last 14 days, in `/var/core`, `/var/crash`, `ns.log*` and
-    `/var/log/messages*` (CVE-2026-88772 exploits crash the packet engine). A
+17. **Crashes and crash reboots** - crash dumps and log lines from the last 14
+    days, in `/var/core`, `/var/crash`, `ns.log*` and `/var/log/messages*`:
+    packet engine crashes and failed DTLS handshakes (CVE-2026-88772 exploits
+    crash the packet engine), AAA daemon (`nsaaad`) failures and Pitboss
+    reboots. A crash alone does not prove an attack (`REVIEW`). A
     failed DTLS handshake (`Handshake failure-Internal Error`) followed within 10
     minutes by a crash is `COMPROMISE` - Mandiant saw that pair on successful
     exploitation.
@@ -250,7 +253,7 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     files or without a file extension - how a
     stolen `/flash/nsconfig` is staged for download. Only name, size and date are
     shown, never the contents. Real packages that carry a name the web shells
-    used (`nsg64.deb`, `nsgclient18.deb`, `nsgbuild.deb`, ...) are `REVIEW`:
+    used (`nsg64.deb`, `nsgclient18.deb`, `nsgclient18_32.deb`, `nsgbuild.deb`, ...) are `REVIEW`:
     some are also real Citrix client package names, so only their content
     (check 13, 23) decides.
 20. **Exploit, scanner and probe strings** in the web and error logs - canary
@@ -272,7 +275,7 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     login-page requests (still visible after `ns.log` has rotated), any
     `pitboss` packet-engine message with a shell character, and base64 PHP
     (`PD9...`) in a User-Agent, shown decoded. Requests for `/vpn/c` and for
-    `nsgclient18.deb` / `nsg64.deb` (also real package names) are `REVIEW`.
+    `nsgclient18.deb`, `nsgclient18_32.deb` / `nsg64.deb` (also real package names) are `REVIEW`.
 21. **Shell history** (`sh.log*`, `bash.log*`) - commands that read LDAP
     credentials or keys (`ldapsearch`, `openssl s_client`, `F1.key` / `F2.key`,
     `/flash/nsconfig/keys`), restart the web server (`httpd -k restart`), set the
@@ -305,6 +308,18 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     matter more. A web shell header name without code that reads it (e.g. in
     documentation) is `REVIEW`.
     PHP / XHTML files elsewhere under `/var/netscaler` are `REVIEW`.
+24. **CVE-2026-88778 (Enhanced ISN Generation)** - the upgrade alone does not
+    fix this one. If a saved config (default or admin partition) has a TCP-based
+    virtual server (HTTP, SSL, TCP, Gateway, ...) and does not contain
+    `set ns tcpParam -enhancedISNgeneration ENABLED`, it is `REVIEW`, with the
+    fix and the check command. Only the saved config is read: run
+    `save ns config` first if you changed it live.
+25. **SAML PrefixList workaround** - a SAML login response with a very long
+    PrefixList crashes the AAA daemon and Pitboss then reboots the box, also on
+    fixed builds. Citrix support hands out a responder policy that drops such
+    requests. A config with SAML login (`add authentication samlAction`) where
+    no responder policy that checks `PrefixList` is bound to an authentication
+    or VPN virtual server is `REVIEW`.
 
 ## Sharing the output
 
@@ -323,7 +338,7 @@ your organisation - for example to help improve nshunt. It masks:
 | Internal IPv4 and IPv6 addresses (also inside URLs) and the box's own NSIP / VIP | `INTERNAL-1`, `INTERNAL-2`, ... |
 | Public IPs outside attack findings (e.g. monitoring, admin PCs) | `PUBLIC-1`, ... |
 | User names: bookmark files, admins, system accounts, crontab owners | `USER-1`, ... |
-| Theme, vserver, policy and EPA action names | `THEME-1`, `VSERVER-1`, `POLICY-1`, `EPA-1`, ... |
+| Theme, vserver, policy, EPA action and admin partition names | `THEME-1`, `VSERVER-1`, `POLICY-1`, `EPA-1`, `PARTITION-1`, ... |
 | URL host names and internal domains (`.local`, `.corp`, ...) | `DOMAIN-1`, ... |
 | Shell-history command lines | only the matched command, e.g. `ldapsearch` |
 | Passwords in logged account commands (`add system user <name> <password>`) | `********` (also in the full report) |
