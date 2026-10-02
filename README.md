@@ -72,7 +72,7 @@ section that explains the result in plain words.
 Example:
 
 ```
-NetScaler quick hunt 1.8 - ns01 - 2026-09-30 14:43
+NetScaler quick hunt 1.9 - ns01 - 2026-09-30 14:43
 Build: 14.1-73.37 - includes the fix for CVE-2026-88771/88772
        fixed build running since 2026-09-28 11:55 UTC (first boot after the install; installed 2026-09-28 11:48 UTC)
 
@@ -146,8 +146,8 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
    `passthru(` / `NSC_TASS` in `LogonPoint/custom` and `/var/vpn`.
 5. **Files written by the web server** - files owned by `nobody` in
    `/var/netscaler/logon`, `/var/netscaler/gui` and `/netscaler/ns_gui`.
-6. **Hidden files** in web folders. The published web shell name
-   `.ctxs.receiver` is `COMPROMISE`.
+6. **Hidden files** in web folders. The published web shell names
+   `.ctxs.receiver` and `.local_journal` are `COMPROMISE`.
 7. **Credential stealers in the login page** - JavaScript that contains an
    external URL next to code that captures or sends data (`password`, `fetch(`,
    `XMLHttpRequest`, `sendBeacon`, `atob`, `new Image`, ...), anywhere in the
@@ -176,7 +176,8 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     `$_POST` / `$_GET` into `eval`, `system`, `passthru`, ...) are `COMPROMISE`;
     other `eval(` / `shell_exec(` calls are marked for a look.
 11. **Web server config** (`/etc/httpd.conf`, `/flash/nsconfig/httpd.conf` and
-    the files they pull in with `Include` / `IncludeOptional`) -
+    the files they pull in with `Include` / `IncludeOptional`, also through
+    further includes) -
     PHP handlers for non-PHP files such as `.deb` or `.sig`, and aliases that map
     an image or CSS URL (e.g. `/vpn/media/<hex>.ico`, `receiver.min.css`) onto a
     hidden, `.sig` or `.deb` file are `COMPROMISE` (WHIPSHOT persistence), as
@@ -189,9 +190,12 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
 12. **Startup scripts** (`rc.netscaler`, `nsbefore.sh`, `nsafter.sh`) that run
     Python, base64 loaders, downloads or `chmod +s` at boot, and decoders,
     Python one-liners or reversed path strings in `ns.conf` and `/etc/rc`.
-    `nsafter.sh` writing into the web folders or `httpd.conf` (`cp`, `mv`, a
-    redirect, `sed -i` ...), setting setuid or decoding payloads is
-    `COMPROMISE`; only reading them is not.
+    `nsafter.sh` writing into the web folders or `httpd.conf` (the destination
+    of `cp`, `mv`, `tee`, a redirect, `sed -i` ...), setting setuid or decoding
+    payloads is `COMPROMISE`; reading them, or copying a file from them as a
+    backup, is not. `/var/python/bin/customsnmpd`,
+    which attackers modified for persistence, is `COMPROMISE` with download or
+    shell code in it and `REVIEW` if it changed since August 2026.
 13. **Disguised files** - `.deb` files in web folders that are not real packages
     (WHIPSHOT is a PHP web shell disguised as a `.deb`), scripts or PHP calls
     (`<?`, `eval(`, `base64_decode(`, `shell_exec(`) in the Gateway
@@ -206,7 +210,12 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     `UXD_IDLE_EXIT`, dropped SLAPSHOT Python files, running `lula`,
     `update_c*.pl`, `/.x`, `xd7h` or `nsmon` processes, and the `nsmon.pl` Perl
     implant (`/var/tmp/.nsmon`, `/var/tmp/.s`, its cron job, a Perl listener on a
-    port between 41000 and 41999).
+    port between 41000 and 41999). The Platypus remote-access agent (TENEX) is
+    `COMPROMISE` when a file in `/netscaler.local/` carries the agent's signing
+    key or at least two of its code signatures (or its known hash), or the
+    certificate in `/var/core/.ns-cache/` comes from the Platypus default CA.
+    File names, or a file that only mentions Platypus, are `REVIEW`. Only
+    certificate details are shown, never the key.
 16. **Web access logs** (`httpaccess*.log*`, including the Gateway's
     `httpaccess-vpn.log`) - `404` answers over 5 KB on `/vpn/media/`,
     `/vpn/scripts/` or `/vpn/theme/` are `COMPROMISE`: WHIPSHOT hides its output
@@ -223,19 +232,22 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     minutes by a crash is `COMPROMISE` - Mandiant saw that pair on successful
     exploitation.
 18. **Known attacker IP addresses** published by Mandiant, GreyNoise, Lupovis,
-    Gotham Technology Group, Unit 42, PitScaler.com and Arctic Wolf, and the
-    domains `echvista.com` / `entretiensol.com`, in `ns.log*`, `/var/log/messages*` and the web
-    access logs, and in current connections. The Cloudflare WARP addresses on
-    the list are marked, because ordinary WARP users share them. About 65
-    opportunistic scanners tagged by GreyNoise are listed separately as a
-    hunting lead only.
+    Gotham Technology Group, Unit 42, PitScaler.com, Arctic Wolf, SpiderLabs,
+    Rapid7 and TENEX, and the domains `echvista.com`, `entretiensol.com` and
+    `white-guard.pro`, in `ns.log*`, `/var/log/messages*` and the web access
+    logs, and in current connections. The Cloudflare WARP addresses on the list
+    are marked, because ordinary WARP users share them. About 65 opportunistic
+    scanners (GreyNoise) and an unattributed wave (TENEX) are listed separately
+    as a hunting lead only, and so are five domains that only appear in the
+    attackers' certificate (`REVIEW`, moderate confidence).
 19. **Files written by the published exploit payloads** - known dropped file
-    names (`/.x`, `/s`, `lula`, `/var/1.py`, `update_c*.pl`, `wtw*` /
+    names (`/.x`, `/s`, `lula`, `/var/1.py`, `update_c*.pl`, `update_result_*.tgz`, `wtw*` /
     `watchTowr*` / `boom*` in `/tmp` and `/var/tmp`,
     `themes/wt88771*`, `nx_verify.html`, `c88771*`, `xua.html`, `/var/tmp/sh`,
     `insight-new.js`, `admin_ui/e.txt` / `log.txt`), small files in the web
     folders containing the output of `id` (in `/tmp` / `/var/tmp` only `REVIEW` -
-    it may be someone's test), and gzip, zip or tar archives disguised as web files - how a
+    it may be someone's test), and gzip, zip or tar archives disguised as web
+    files or without a file extension - how a
     stolen `/flash/nsconfig` is staged for download. Only name, size and date are
     shown, never the contents. Real packages that carry a name the web shells
     used (`nsg64.deb`, `nsgclient18.deb`, `nsgbuild.deb`, ...) are `REVIEW`:
@@ -254,10 +266,13 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     `REVIEW`. PHP errors raised inside a file with a non-PHP extension (`.sig`,
     `.deb`, `.ico`, ...) in the error logs are `COMPROMISE`: PHP executed it.
     Also `ATTEMPT`: payload strings (`xd7h/`, `/dev/tcp/`, `nc -e`,
-    `base64 -w0`, `exec-ok`, web shell header names), attack payloads in
+    `base64 -w0`, `exec-ok`, web shell header names, Platypus agent traffic),
+    requests for the `.local_journal` web shell alias and `insight-new.js`,
+    attack payloads in
     login-page requests (still visible after `ns.log` has rotated), any
     `pitboss` packet-engine message with a shell character, and base64 PHP
-    (`PD9...`) in a User-Agent, shown decoded.
+    (`PD9...`) in a User-Agent, shown decoded. Requests for `/vpn/c` and for
+    `nsgclient18.deb` / `nsg64.deb` (also real package names) are `REVIEW`.
 21. **Shell history** (`sh.log*`, `bash.log*`) - commands that read LDAP
     credentials or keys (`ldapsearch`, `openssl s_client`, `F1.key` / `F2.key`,
     `/flash/nsconfig/keys`), restart the web server (`httpd -k restart`), set the
@@ -278,9 +293,11 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     and unbound EPA policies are `REVIEW`. The
     saved `ns.conf` is compared with the newest older copy from before August
     2026 (`ns.conf.NS<old build>` from an upgrade, `ns.conf.0-4`, `.bak`): system
-    users added since, and `NO_AUTH` EPA actions, are `REVIEW`.
+    users added since, and `NO_AUTH` EPA actions, are `REVIEW`. The account
+    `sec_monitor`, which the `update_c08937.pl` payload creates, is `COMPROMISE`.
 23. **Known web shells and payloads by hash and code** - SHA-256 of published
-    web shells and payloads (GreyNoise, IFIN, eSentire, Arctic Wolf, Unit 42) in
+    web shells and payloads (GreyNoise, IFIN, eSentire, Arctic Wolf, Unit 42,
+    SpiderLabs) in
     the web, plugin and media folders, `/tmp`, `/var/tmp` and the top of `/` and
     `/var`; WHIPSHOT code (`HTTP_X_UX` read by code, `HTTP_NSC_CLIENTTYPE` /
     `LDAP` with `eval`) and the Unit 42 web shell's key, passphrase and token,
@@ -370,7 +387,9 @@ NSHUNT_ROOT=/mnt/netscaler-image sh nshunt.sh
 
 Many indicators come from public research by Mandiant / Google Threat
 Intelligence ([hunting guide](https://cloud.google.com/blog/topics/threat-intelligence/defending-against-active-exploitation-of-citrix-netscaler-adc-and-gateway-appliances)),
-Palo Alto Networks Unit 42 ([threat brief](https://unit42.paloaltonetworks.com/netscaler-zero-days-exploited/)), GreyNoise, watchTowr, Lupovis, CERT-EU and Kevin Beaumont. The
+Palo Alto Networks Unit 42 ([threat brief](https://unit42.paloaltonetworks.com/netscaler-zero-days-exploited/)),
+SpiderLabs ([hunt indicators](https://www.levelblue.com/blogs/spiderlabs-blog/citrix-netscaler-cve-2026-88771-observed-exploitation-artifacts-and-hunt-indicators)),
+TENEX ([Platypus analysis](https://tenex.ai/blog/what-tenex-observed-inside-active-exploitation-of-netscaler-zero-day/)), Rapid7, GreyNoise, watchTowr, Lupovis, CERT-EU and Kevin Beaumont. The
 checks added in 1.3 and 1.6 are based on the indicator lists of Thomas
 Poppelgaard's [netscaler-ctx697096-checker](https://github.com/ThomasPoppelgaard/netscaler-ctx697096-checker)
 (v1.7 - v1.9), which include indicators from Gotham Technology Group, Manuel
