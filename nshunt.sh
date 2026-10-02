@@ -2,7 +2,8 @@
 grep -q "$(printf '\r')" "$0" && printf '%s\n' "ERROR: $0 has Windows line endings. Fix: tr -d '\\r' < $0 > /tmp/nshunt-fixed.sh ; sh /tmp/nshunt-fixed.sh" && exit 2
 # nshunt.sh - quick NetScaler compromise hunt. Prints findings only.
 #
-# Usage:  sh nshunt.sh        (read-only; changes nothing on the box)
+# Usage:  sh nshunt.sh            (read-only; changes nothing on the box)
+#         sh nshunt.sh --share    also write an anonymised copy for sharing
 #
 # The output is shown on screen and saved to ./results-nshunt.txt (another
 # file: NSHUNT_OUT=/path/file). Only that file and a temp dir are written.
@@ -17,27 +18,157 @@ grep -q "$(printf '\r')" "$0" && printf '%s\n' "ERROR: $0 has Windows line endin
 # logs or a check that crashed) or the report could not be saved - never
 # trust "no findings" with exit 2.
 
-VERSION=1.6
+VERSION=1.7
+
+# anonymise <host>: stdin report -> copy that can leave the organisation.
+# Masks the host name, internal IPs and the box's own addresses, public IPs
+# outside attack findings, user names (bookmarks, admins, system users,
+# crontab owners), theme names, EPA action names, URL hosts / internal
+# domains outside attacker payloads, and shell-history arguments. Attack data
+# (source IPs, payloads, decoded User-Agents) is kept - that is the point.
+anonymise() {
+	awk -v host="$1" '
+	# word <s> <w> <r>: replace w where it stands alone (not inside ns.log, nsroot),
+	# scanning forward so a replacement is never searched again
+	function word(s, w, r,   out, i, b, a) {
+		out = ""
+		while ((i = index(s, w)) > 0) {
+			b = (i > 1) ? substr(s, i - 1, 1) : ""; a = substr(s, i + length(w), 1)
+			if (b !~ /[A-Za-z0-9_.\/-]/ && a !~ /[A-Za-z0-9_.\/-]/) out = out substr(s, 1, i - 1) r
+			else out = out substr(s, 1, i - 1 + length(w))
+			s = substr(s, i + length(w))
+		}
+		return out s
+	}
+	function map(kind, v,   k) { if (kind == "THEME") gsub(/%20/, " ", v); k = kind SUBSEP v; if (!(k in m)) m[k] = kind "-" (++c[kind]); return m[k] }
+	function priv(ip) { return ip ~ /^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.)/ }
+	function ips(s, keeppub,   out, ip, pre, prev) {
+		out = ""
+		while (match(s, /[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/)) {
+			ip = substr(s, RSTART, RLENGTH); pre = substr(s, 1, RSTART - 1); s = substr(s, RSTART + RLENGTH)
+			prev = substr(pre, length(pre), 1)
+			# a version number (Chrome/124.0.0.0, v1.2.3.4) - but an address in a URL is masked
+			if (pre !~ /(:\/\/|@)$/ && (prev ~ /[A-Za-z._-]/ || pre ~ /[A-Za-z][A-Za-z0-9_.-]*\/$/)) { out = out pre ip; continue }
+			if (ip ~ /^127\./) out = out pre ip
+			else if (pre ~ /(-> |<local[0-9]\.[a-z]+> +| from )$/) out = out pre (priv(ip) ? map("INTERNAL", ip) : map("PUBLIC", ip))
+			else if (priv(ip)) out = out pre map("INTERNAL", ip)
+			else if (keeppub) out = out pre ip
+			else out = out pre map("PUBLIC", ip)
+		}
+		return v6(out s, keeppub)
+	}
+	# v6 <s> <keep-public>: the same for IPv6 (also [bracketed] in URLs). A token of
+	# hex digits and colons counts only with "::" or 7 colons - not a time (07:08:40)
+	function v6(s, keeppub,   out, t, pre, lt) {
+		out = ""
+		while (match(s, /[0-9A-Fa-f:]*:[0-9A-Fa-f:]*/)) {
+			t = substr(s, RSTART, RLENGTH); pre = substr(s, 1, RSTART - 1); s = substr(s, RSTART + RLENGTH)
+			if (t !~ /::/ && gsub(/:/, ":", t) < 7) { out = out pre t; continue }
+			lt = tolower(t)
+			if (lt == "::1" || lt == "::") out = out pre t
+			else if (pre ~ /(-> |<local[0-9]\.[a-z]+> +| from )\[?$/) out = out pre ((lt ~ /^(f[cd]|fe[89ab])/) ? map("INTERNAL", lt) : map("PUBLIC", lt))
+			else if (lt ~ /^(f[cd]|fe[89ab])/) out = out pre map("INTERNAL", lt)
+			else if (keeppub) out = out pre t
+			else out = out pre map("PUBLIC", lt)
+		}
+		return out s
+	}
+	# swap <s> <re> <pre> <post> <kind> <keep-re>: in each match of re, mask what
+	# lies between the first pre and the last post characters (the name)
+	function swap(s, re, n, k, kind, keep,   out, w, name) {
+		out = ""
+		while (match(s, re)) {
+			w = substr(s, RSTART, RLENGTH); out = out substr(s, 1, RSTART - 1); s = substr(s, RSTART + RLENGTH)
+			name = substr(w, n + 1, length(w) - n - k)
+			out = out substr(w, 1, n) ((keep != "" && name ~ keep) ? name : map(kind, name)) substr(w, length(w) - k + 1)
+		}
+		return out s
+	}
+	NR == 1 { print "# nshunt report, ANONYMISED FOR SHARING - read it before you send it. Masked: host name,"
+	          print "# internal IPs, user names, theme and EPA names, internal domains, shell-history arguments."
+	          print "# Kept: attack sources and payloads, file paths (check them), dates, build, results." }
+	/^\[(COMPROMISE|ATTEMPT|REVIEW)\]/ { lvl = substr($1, 2, length($1) - 2) }
+	/^[^ \t\[]/ && !/^\[/ { lvl = "" }
+	{
+		l = $0
+		# the host name as written, in upper and lower case, full and short (no domain)
+		if (host != "" && !hn) { hs = host; sub(/\..*/, "", hs)
+			HN[++hn] = host; HN[++hn] = toupper(host); HN[++hn] = tolower(host)
+			HN[++hn] = hs; HN[++hn] = toupper(hs); HN[++hn] = tolower(hs) }
+		for (j = 1; j <= hn; j++) l = word(l, HN[j], "HOST")
+		# shell history: keep only the command words nshunt looked for
+		if (match(l, /sh_command="[^"]*"?/)) {
+			cmd = substr(l, RSTART, RLENGTH); kw = ""
+			n = split("ldapsearch|openssl s_client|/flash/nsconfig/keys|F1.key|F2.key|database.php|LDAPTLS_REQCERT|cp /usr/bin/bash|del /etc/auth.conf|httpd -k restart|chmod|nsshutdown -R|kill -HUP|cli_script", K, "|")
+			for (j = 1; j <= n; j++) if (index(cmd, K[j])) kw = kw (kw != "" ? ", " : "") K[j]
+			l = substr(l, 1, RSTART - 1) "sh_command: " kw " (rest removed)" substr(l, RSTART + RLENGTH)
+		}
+		l = swap(l, "/var/vpn/bookmark/[^ /]+", 18, 0, "USER", "^pwnpzi")
+		l = swap(l, "UTC  by [^ ]+ from ", 8, 6, "USER", "")
+		l = swap(l, "system user [^ ]+", 12, 0, "USER", "")
+		l = swap(l, "/var/cron/tabs/[^ :/]+", 15, 0, "USER", "^root$")
+		l = swap(l, "/themes/[^/]+/", 8, 1, "THEME", "^(Default|RfWebUI|X1|Greenbubble|Caxton|EULA)$")
+		l = swap(l, "epaAction [^ ]+", 10, 0, "EPA", "")
+		l = swap(l, "vserver [^ ]+", 8, 0, "VSERVER", "")
+		l = swap(l, "policylabel [^ ]+", 12, 0, "LABEL", "")
+		l = swap(l, "-policy [^ \"]+", 8, 0, "POLICY", "")
+		l = swap(l, "-policyName [^ \"]+", 12, 0, "POLICY", "")
+		payload = (l ~ /tried:|decoded |INDEX:/)
+		if (!payload) {
+			l = swap(l, "://[A-Za-z][A-Za-z0-9.-]*[A-Za-z]", 3, 0, "DOMAIN", "^(echvista\\.com|entretiensol\\.com)$")
+			l = swap(l, "[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*\\.(local|lan|corp|intern|internal|intra|home|ad|priv)", 0, 0, "DOMAIN", "")
+		}
+		print ips(l, (lvl == "COMPROMISE" || lvl == "ATTEMPT") && !payload || payload)
+	}'
+}
 
 # Save everything to the results file: run the script again as a child and
 # copy its output to the screen and the file, keeping its exit code.
+# Reports are written to a new private temp file next to the destination and
+# then moved into place - never through an existing file, so a symlink planted
+# at that name cannot make root overwrite something else.
 if [ -z "${NSHUNT_CHILD:-}" ]; then
+	SHARE=""; for a in "$@"; do [ "$a" = "--share" ] && SHARE=1; done
 	OUT=${NSHUNT_OUT:-./results-nshunt.txt}
 	case "$OUT" in /*) ;; *) OUT=$(pwd)/${OUT#./} ;; esac
-	# root only: the report names users, internal IPs and file paths
-	if ( umask 077; : > "$OUT" ) 2>/dev/null && chmod 600 "$OUT" 2>/dev/null; then
-		st=$(mktemp /tmp/nshunt-rc.XXXXXX) || exit 2
-		{ NSHUNT_CHILD=1 sh "$0" "$@" 2>&1; echo $? > "$st"; } | tee "$OUT"
+	# place <tmp> <dest>: root-only permissions, then rename over the destination;
+	# a symlink or directory at that name is refused, not followed
+	place() {
+		if [ -L "$2" ] || [ -d "$2" ]; then
+			echo "ERROR: $2 is a symlink or a directory - not overwritten." >&2; rm -f "$1"; return 1
+		fi
+		chmod 600 "$1" && mv -f "$1" "$2"
+	}
+	tmp=$(umask 077; mktemp "${OUT%/*}/.results-nshunt.XXXXXX" 2>/dev/null)
+	if [ -n "$tmp" ]; then
+		st=$(mktemp /tmp/nshunt-rc.XXXXXX) || { rm -f "$tmp"; exit 2; }
+		{ NSHUNT_CHILD=1 sh "$0" "$@" 2>&1; echo $? > "$st"; } | tee "$tmp"
 		tst=$?   # tee's status: the report file could not be written (disk full ...)
 		rc=$(cat "$st"); rm -f "$st"
-		if [ "$tst" -ne 0 ] || [ ! -s "$OUT" ]; then
+		if [ "$tst" -ne 0 ] || [ ! -s "$tmp" ] || ! place "$tmp" "$OUT"; then
+			rm -f "$tmp"
 			echo "ERROR: the report could not be saved to $OUT - copy the output above." >&2
 			exit 2
 		fi
 		echo "Saved to: $OUT"
+		if [ -n "$SHARE" ]; then
+			SH="${OUT%.txt}-share.txt"
+			stmp=$(umask 077; mktemp "${SH%/*}/.results-nshunt-share.XXXXXX" 2>/dev/null)
+			if [ -n "$stmp" ] && anonymise "$(hostname)" < "$OUT" > "$stmp" && [ -s "$stmp" ] && place "$stmp" "$SH"; then
+				echo "Anonymised copy for sharing: $SH - read it before you send it."
+			else
+				[ -n "$stmp" ] && rm -f "$stmp"
+				echo "ERROR: the anonymised copy could not be written to $SH." >&2
+				exit 2
+			fi
+		fi
 		exit "${rc:-2}"
 	fi
-	echo "NOTE: cannot write $OUT - output is shown on screen only." >&2
+	if [ -n "$SHARE" ]; then
+		echo "ERROR: cannot write in ${OUT%/*} - --share needs a folder for the report files." >&2
+		exit 2
+	fi
+	echo "NOTE: cannot write in ${OUT%/*} - output is shown on screen only." >&2
 fi
 
 R=${NSHUNT_ROOT:-}   # test hook: prefix for all paths
@@ -55,10 +186,21 @@ when() { ls -ldT "$1" 2>/dev/null | awk '{ m = (index("JanFebMarAprMayJunJulAugS
 	printf "%s-%02d-%02d %s\n", $9, m, $7, substr($8, 1, 5) }'; }
 # redact: mask secrets in lines printed from logs, scripts and configs -
 # passwords after -w / -password / -bindpw / password= ..., and user:pass@ in URLs
-redact() { sed -E \
+redact() {
+	# flags: -w <secret>, also quoted ("a b", 'a b', \"a b\" inside a logged command line)
+	F='((^|[[:space:]"=])-(w|bindpw|bindDnPassword|ldapBindDnPassword|password|passwd|pass|secret|radKey|key))'
+	# assignments: password=, passwd=, pwd=, secret=, token= - any case
+	A='(([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Pp][Aa][Ss][Ss][Ww][Dd]|[Pp][Ww][Dd]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn])[[:space:]]*[=:][[:space:]]*)'
+	sed -E \
 	-e 's#(://[^/:@[:space:]]+):[^@/[:space:]]+@#\1:****@#g' \
-	-e 's/((^|[[:space:]"])-(w|bindpw|bindDnPassword|ldapBindDnPassword|password|passwd|pass|secret|radKey|key))([[:space:]]+)[^[:space:]"]+/\1\4****/g' \
-	-e 's/(([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Pp][Aa][Ss][Ss][Ww][Dd]|[Pp][Ww][Dd]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn])=)[^&[:space:]"]+/\1****/g'; }
+	-e "s/$F([[:space:]]+)\\\\\"[^\"]*\\\\\"/\\1\\4****/g" \
+	-e "s/$F([[:space:]]+)\"[^\"]*\"/\\1\\4****/g" \
+	-e "s/$F([[:space:]]+)'[^']*'/\\1\\4****/g" \
+	-e "s/$F([[:space:]]+)[^[:space:]\"']+/\\1\\4****/g" \
+	-e "s/$A\\\\\"[^\"]*\\\\\"/\\1****/g" \
+	-e "s/$A\"[^\"]*\"/\\1****/g" \
+	-e "s/$A'[^']*'/\\1****/g" \
+	-e "s/$A[^&[:space:]\"']+/\\1****/g"; }
 # shown <path>: the path for display, line breaks in names made visible
 shown() { printf '%s' "$1" | tr '\n\r\t' '???'; }
 # list: stdin paths -> "date  path"
@@ -995,8 +1137,10 @@ done
 			d = ""; if (match($0, /[0-9][0-9]\/[0-9][0-9]\/[0-9][0-9][0-9][0-9]:[0-9][0-9]:[0-9][0-9]/)) {
 				s = substr($0, RSTART, RLENGTH); d = substr(s, 7, 4) "-" substr(s, 1, 2) "-" substr(s, 4, 2) " " substr(s, 12, 5) " UTC" }
 			c = ""; if (match($0, /Command "[^"]*"/)) c = substr($0, RSTART + 9, RLENGTH - 10)
+			# "add/set system user <name> <password> ..." - the password is positional
+			if (c ~ /^(add|set) system user [^ ]+ [^-]/) { n = split(c, w, " "); w[5] = "********"; c = w[1]; for (i = 2; i <= n; i++) c = c " " w[i] }
 			printf "%s  by %s from %s%s: %s\n", d, (u != "" ? u : "?"), (ip != "" ? ip : "?"),
-				(ip ~ /^127\./ ? " (the box itself - a script)" : ""), substr(c, 1, 120) }' > "$T/cmd"
+				(ip ~ /^127\./ ? " (the box itself - a script)" : ""), substr(c, 1, 120) }' | redact > "$T/cmd"
 	# The source decides: GUI, SSH and NITRO commands carry the admin PC's IP,
 	# while a script on the box (cli_script.sh / nscli, like the payload) logs
 	# 127.0.0.1. A script adding admins or letting EPA failures through is the

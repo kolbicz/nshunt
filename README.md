@@ -32,7 +32,9 @@ sh nshunt.sh
 
 The output is shown on screen and saved to `results-nshunt.txt` in the current
 directory (`/var/tmp` survives a reboot, `/tmp` does not), readable by root
-only. Set `NSHUNT_OUT=/path/file` to save it elsewhere.
+only. Set `NSHUNT_OUT=/path/file` to save it elsewhere. Reports are written to
+a new temp file and then moved into place; a symlink or directory at the report
+name is refused, not followed.
 
 The script changes nothing on the appliance. Apart from the results file it only
 creates a temporary directory in `/tmp`, which it removes when it finishes. It needs nothing beyond
@@ -68,7 +70,7 @@ section that explains the result in plain words.
 Example:
 
 ```
-NetScaler quick hunt 1.6 - ns01 - 2026-09-30 14:43
+NetScaler quick hunt 1.7 - ns01 - 2026-09-30 14:43
 Build: 14.1-73.37 - includes the fix for CVE-2026-88771/88772
        fixed build running since 2026-09-28 11:55 UTC (first boot after the install; installed 2026-09-28 11:48 UTC)
 
@@ -108,7 +110,7 @@ Saved to: /var/tmp/results-nshunt.txt
 |------|---------|
 | `0`  | No findings |
 | `1`  | Findings |
-| `2`  | Scan **incomplete** - a log could not be read, a check crashed, or a file system error occurred - or the report file could not be saved. Do not trust "no findings" with exit code 2. |
+| `2`  | Scan **incomplete** - a log could not be read, a check crashed, or a file system error occurred - or the report file (or, with `--share`, the anonymised copy) could not be saved. Do not trust "no findings" with exit code 2. |
 
 If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still run.
 
@@ -271,6 +273,34 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
 
 ## Sharing the output
 
+### Anonymised copy (`--share`)
+
+```sh
+sh nshunt.sh --share
+```
+
+writes a second file, `results-nshunt-share.txt` (root only), meant to leave
+your organisation - for example to help improve nshunt. It masks:
+
+| Masked | Replaced with |
+|--------|---------------|
+| The appliance's host name (any case, short and full) | `HOST` |
+| Internal IPv4 and IPv6 addresses (also inside URLs) and the box's own NSIP / VIP | `INTERNAL-1`, `INTERNAL-2`, ... |
+| Public IPs outside attack findings (e.g. monitoring, admin PCs) | `PUBLIC-1`, ... |
+| User names: bookmark files, admins, system accounts, crontab owners | `USER-1`, ... |
+| Theme, vserver, policy and EPA action names | `THEME-1`, `VSERVER-1`, `POLICY-1`, `EPA-1`, ... |
+| URL host names and internal domains (`.local`, `.corp`, ...) | `DOMAIN-1`, ... |
+| Shell-history command lines | only the matched command, e.g. `ldapsearch` |
+| Passwords in logged account commands (`add system user <name> <password>`) | `********` (also in the full report) |
+
+The same name always gets the same token within one file, so the report stays
+readable. Attack data is kept on purpose: attacker IPs, payloads, decoded
+User-Agents, exploit file names, file paths, dates, build and results. File
+paths can still contain a name (`/var/tmp/jdoe-backup.conf`), and the masking
+only knows the formats nshunt prints - **read the file before you send it.**
+
+### The full report
+
 The report is meant for your security team and incident responders, not for
 public posting. It contains:
 
@@ -283,7 +313,8 @@ public posting. It contains:
 It never prints file contents of configs, keys or config dumps. Lines that
 nshunt prints from shell history, startup scripts, crontabs and access logs
 are passed through a filter that masks passwords (`-w`, `-password`,
-`-bindpw`, `password=`, `pwd=`, `token=`, `user:pass@` in URLs), but that
+`-bindpw`, `password=`, `pwd=`, `token=`, `user:pass@` in URLs - quoted values
+with spaces too), but that
 filter cannot know every format: **read the report before you share it**, and
 replace host names, user names and internal IPs if it leaves your organisation.
 
