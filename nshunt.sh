@@ -18,7 +18,7 @@ grep -q "$(printf '\r')" "$0" && printf '%s\n' "ERROR: $0 has Windows line endin
 # logs or a check that crashed) or the report could not be saved - never
 # trust "no findings" with exit 2.
 
-VERSION=1.7
+VERSION=1.8
 
 # anonymise <host>: stdin report -> copy that can leave the organisation.
 # Masks the host name, internal IPs and the box's own addresses, public IPs
@@ -34,7 +34,7 @@ anonymise() {
 		out = ""
 		while ((i = index(s, w)) > 0) {
 			b = (i > 1) ? substr(s, i - 1, 1) : ""; a = substr(s, i + length(w), 1)
-			if (b !~ /[A-Za-z0-9_.\/-]/ && a !~ /[A-Za-z0-9_.\/-]/) out = out substr(s, 1, i - 1) r
+			if (index(w, ".") ? (b !~ /[A-Za-z0-9_.-]/ && a !~ /[A-Za-z0-9_-]/) : (b !~ /[A-Za-z0-9_.\/-]/ && a !~ /[A-Za-z0-9_.\/-]/)) out = out substr(s, 1, i - 1) r
 			else out = out substr(s, 1, i - 1 + length(w))
 			s = substr(s, i + length(w))
 		}
@@ -97,7 +97,7 @@ anonymise() {
 			HN[++hn] = hs; HN[++hn] = toupper(hs); HN[++hn] = tolower(hs) }
 		for (j = 1; j <= hn; j++) l = word(l, HN[j], "HOST")
 		# shell history: keep only the command words nshunt looked for
-		if (match(l, /sh_command="[^"]*"?/)) {
+		if (match(l, /sh_command=".*/)) {
 			cmd = substr(l, RSTART, RLENGTH); kw = ""
 			n = split("ldapsearch|openssl s_client|/flash/nsconfig/keys|F1.key|F2.key|database.php|LDAPTLS_REQCERT|cp /usr/bin/bash|del /etc/auth.conf|httpd -k restart|chmod|nsshutdown -R|kill -HUP|cli_script", K, "|")
 			for (j = 1; j <= n; j++) if (index(cmd, K[j])) kw = kw (kw != "" ? ", " : "") K[j]
@@ -168,7 +168,8 @@ if [ -z "${NSHUNT_CHILD:-}" ]; then
 		echo "ERROR: cannot write in ${OUT%/*} - --share needs a folder for the report files." >&2
 		exit 2
 	fi
-	echo "NOTE: cannot write in ${OUT%/*} - output is shown on screen only." >&2
+	echo "NOTE: cannot write in ${OUT%/*} - output is shown on screen only (exit code 2)." >&2
+	NOSAVE=1
 fi
 
 R=${NSHUNT_ROOT:-}   # test hook: prefix for all paths
@@ -179,6 +180,32 @@ trap 'rm -rf "$T"' EXIT INT TERM
 : > "$T/count"
 # Every filesystem error lands here; any line means the scan is incomplete.
 E="$T/scanerr"; : > "$E"
+
+# The checks are pipelines of awk, grep, sed, find and gzip: if one of them is
+# broken, every check would come back empty and look clean. Test them first.
+st_ok=1
+[ "$(printf 'a b\n' | awk '{ print $2 }' 2>/dev/null)" = b ] || st_ok=awk
+[ "$(printf 'x\nab\n' | grep -E 'a+b' 2>/dev/null)" = ab ] || st_ok=grep
+[ "$(printf 'ab\n' | sed 's/a/c/' 2>/dev/null)" = cb ] || st_ok=sed
+[ "$(printf 'z\n' | gzip -c 2>/dev/null | gzip -dc 2>/dev/null)" = z ] || st_ok=gzip
+[ "$(find "$T" -name count 2>/dev/null)" = "$T/count" ] || st_ok=find
+# Every other tool the checks use: NetScaler's FreeBSD is trimmed (no stat,
+# no comm), so a missing one is reported and makes the scan incomplete.
+for t in cat cut date env head ls mktemp mv od rm sort tail tee touch tr uniq wc xargs; do
+	command -v "$t" >/dev/null 2>&1 || echo "tool '$t' is missing - the checks that use it are incomplete" >> "$E"
+done
+if [ "$st_ok" != 1 ]; then
+	echo "ERROR: the system tool '$st_ok' does not work - no check would be reliable. Scan INCOMPLETE - aborted."
+	exit 2
+fi
+
+# rd <file>: print a log, unzipped if needed. A read error makes the scan
+# incomplete; being cut off by a reader that has seen enough (SIGPIPE) does not.
+rd() {
+	case "$1" in *.gz) gzip -dc "$1" ;; *) cat "$1" ;; esac 2>/dev/null
+	rc=$?; if [ "$rc" -ne 0 ] && [ "$rc" -lt 128 ]; then echo "${1#$R}: could not be read" >> "$E"; fi
+	return 0
+}
 
 dirs() { for d in $1; do [ -d "$R$d" ] && printf '%s\n' "$R$d"; done; }
 # when <file> -> "2020-01-11 16:05" (ls -T works on every NetScaler; stat may be missing)
@@ -211,7 +238,8 @@ finding() {
 	echo "$1" >> "$T/count"
 	echo ""
 	echo "[$1] $2"
-	sed 's/^/       /' "$3"
+	# every line goes through the password filter, whatever check produced it
+	redact < "$3" | sed 's/^/       /'
 }
 # Date helpers for awk programs: mins(y,m,d,h,mi) -> minutes since year 0 (UTC
 # when the input is UTC), mon("Sep") -> 9, nowmins() -> current UTC time.
@@ -220,6 +248,7 @@ function dfc(y, m, d,   era, yoe, doy) { y -= (m <= 2); era = int(y / 400); yoe 
 	doy = int((153 * (m > 2 ? m - 3 : m + 9) + 2) / 5) + d - 1
 	return era * 146097 + yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy }
 function mins(y, m, d, h, mi) { return (dfc(y, m, d) * 24 + h) * 60 + mi }
+function secs(y, m, d, h, mi, sc) { return mins(y, m, d, h, mi) * 60 + sc }
 function mon(s) { return (index("JanFebMarAprMayJunJulAugSepOctNovDec", s) + 2) / 3 }
 '
 NOW=$(date -u +%Y%m%d%H%M)
@@ -227,16 +256,14 @@ NOW=$(date -u +%Y%m%d%H%M)
 # alogs: every web access log (httpaccess.log, httpaccess-vpn.log, ...) and rotation, unzipped
 alogs() {
 	for f in "$R"/var/log/httpaccess*.log "$R"/var/log/httpaccess*.log.*; do
-		[ -f "$f" ] || continue
-		case "$f" in *.gz) gzip -dc "$f" ;; *) cat "$f" ;; esac
-	done 2>/dev/null
+		[ -f "$f" ] && rd "$f"
+	done
 }
 # logs [name]: every rotation of /var/log/<name> (default ns.log), unzipped
 logs() {
 	for f in "$R/var/log/${1:-ns.log}" "$R/var/log/${1:-ns.log}".*; do
-		[ -f "$f" ] || continue
-		case "$f" in *.gz) gzip -dc "$f" ;; *) cat "$f" ;; esac
-	done 2>/dev/null
+		[ -f "$f" ] && rd "$f"
+	done
 }
 
 echo "NetScaler quick hunt $VERSION - $(hostname) - $(date '+%Y-%m-%d %H:%M')"
@@ -249,7 +276,7 @@ KF=${NSHUNT_BOOTFILE:-}
 BUILD=$(printf '%s\n' "$KF" | sed -nE 's/.*ns-([0-9]+\.[0-9]+)-([0-9]+)\.([0-9]+).*/\1 \2 \3/p')
 [ -z "$BUILD" ] && BUILD=$(head -1 "$R/flash/nsconfig/ns.conf" 2>/dev/null |
 	sed -nE 's/^#NS([0-9]+\.[0-9]+) Build ([0-9]+)\.([0-9]+).*/\1 \2 \3/p')
-FIXED=unknown; BINST=""; FIXUTC=""; FIXGUESS=""
+FIXED=unknown; BINST=""; FIXUTC=""; FIXSEC=""; FIXGUESS=""
 # epoch <file>: modification time in seconds (ls -T works everywhere; stat may be missing)
 epoch() { [ -e "$1" ] || return 0
 	# shellcheck disable=SC2046
@@ -270,7 +297,8 @@ if [ -n "$BUILD" ]; then
 	14.1) if [ "$BMA" -eq 37 ]; then FIXED=unknown; elif ge 73 37; then FIXED=yes; else FIXED=no; fi ;;
 	13.1) if [ "$BMA" -eq 37 ]; then { ge 37 279 && FIXED=yes; } || FIXED=no
 	      elif ge 64 23; then FIXED=yes; else FIXED=no; fi ;;
-	*)    FIXED=no ;;
+	13.0|12.*|11.*|10.*) FIXED=no ;;   # end of life, no fix
+	*)    FIXED=unknown ;;              # a release this script does not know
 	esac
 	# When did the fixed build start RUNNING? Installing it does not protect
 	# the box - the old build runs until the next boot. installns writes the
@@ -299,7 +327,7 @@ if [ -n "$BUILD" ]; then
 			elif [ -n "$bs" ] && [ "$inst" -gt $((bs + 300)) ]; then fixt=$bs; fsrc="last boot - ${d##*/} is newer"; FIXGUESS=""; fi
 		fi
 	fi
-	[ -n "$fixt" ] && FIXUTC="$(date -u -r "$fixt" '+%Y-%m-%d %H:%M') UTC"
+	[ -n "$fixt" ] && FIXUTC="$(date -u -r "$fixt" '+%Y-%m-%d %H:%M') UTC" && FIXSEC=$(date -u -r "$fixt" '+%Y-%m-%d %H:%M:%S')
 	case "$FIXED" in
 	yes) echo "Build: $REL-$BMA.$BMI - includes the fix for CVE-2026-88771/88772"
 	     if [ -n "$FIXUTC" ]; then
@@ -308,7 +336,7 @@ if [ -n "$BUILD" ]; then
 	         echo "       running since the last boot, $BOOTED (install date not found)"
 	     fi ;;
 	no)  echo "Build: $REL-$BMA.$BMI - VULNERABLE to CVE-2026-88771/88772 - upgrade now (fixed: 14.1-73.37, 13.1-64.24)" ;;
-	*)   echo "Build: $REL-$BMA.$BMI - fix status unknown (FIPS numbering?) - compare with the Citrix bulletin CTX697096" ;;
+	*)   echo "Build: $REL-$BMA.$BMI - fix status unknown (FIPS numbering or a release this script does not know) - compare with the Citrix bulletin CTX697096" ;;
 	esac
 else
 	echo "Build: unknown - check with \"show ns version\" (fixed: 14.1-73.37, 13.1-64.24)"
@@ -349,6 +377,9 @@ done
 				printf '%s  %s  (%s)\n' "$(when "$f")" "$(shown "${f#$R}")" "$kind" >> "$T/f2"
 			fi
 		done
+		# deeper subfolders: the exploit name or template code only
+		find "$R/var/vpn/bookmark" -mindepth 3 -type f \( -name 'pwnpzi*' -o -exec grep -q '\[%' {} \; \) -print 2>>"$E" |
+			list | sed 's/$/  (exploit file name or template code, in a subfolder)/' >> "$T/f"
 		sort -o "$T/f" "$T/f"; sort -o "$T/f2" "$T/f2"
 	fi
 	[ -d "$R/netscaler/portal/templates" ] &&
@@ -365,9 +396,9 @@ done
 	logs | grep -E 'LOGIN_FAILED|sending login req to aaad for <' |
 		grep -E 'pitboss|NSPPE[[:space:]]*(;|%3B)|missed too many heartbeats|`|\$\{IFS\}|%24%7BIFS|\$\(|\|[ ]*sh' |
 	awk '{
-		d = ""; if (match($0, /[0-9][0-9]\/[0-9][0-9]\/[0-9][0-9][0-9][0-9]:[0-9][0-9]:[0-9][0-9]/)) {
-			s = substr($0, RSTART, RLENGTH)
-			d = substr(s, 7, 4) "-" substr(s, 1, 2) "-" substr(s, 4, 2) " " substr(s, 12, 5)
+		d = ""; if (match($0, /[0-9][0-9]\/[0-9][0-9]\/[0-9][0-9][0-9][0-9]:[0-9][0-9]:[0-9][0-9](:[0-9][0-9])?/)) {
+			s = substr($0, RSTART, RLENGTH); if (length(s) == 16) s = s ":00"
+			d = substr(s, 7, 4) "-" substr(s, 1, 2) "-" substr(s, 4, 2) " " substr(s, 12, 8)
 		}
 		if (/LOGIN_FAILED/) {
 			ip = "?"; if (match($0, /Client_ip [0-9a-fA-F.:]+/)) ip = substr($0, RSTART + 10, RLENGTH - 10)
@@ -382,18 +413,24 @@ done
 		sort -t "$(printf '\t')" -k2 > "$T/att"
 
 	if [ -s "$T/att" ]; then
-		# With a fixed build, mark attempts from before its install: only those
-		# could have run (ISO dates compare as strings).
-		inst=""; [ "$FIXED" = yes ] && inst=$(printf '%s' "$FIXUTC" | cut -c1-16)
+		# With a fixed build, mark attempts from before it was running: only those
+		# could have run (ISO dates with seconds compare as strings). An attempt
+		# without a readable date is never counted as "after".
+		inst=""; [ "$FIXED" = yes ] && inst=$FIXSEC
 		awk -F '\t' -v inst="$inst" '
 		!($1 in n) { order[++k] = $1; first[$1] = $2 }
-		{ n[$1]++; last[$1] = $2; if (!seen[$1 SUBSEP $3]++) p[$1] = p[$1] "\n  tried: " substr($3, 1, 110)
-		  if (inst != "" && $2 != "" && $2 < inst) before[$1] = 1 }
+		{ n[$1]++; if ($2 != "") last[$1] = $2; if (first[$1] == "" && $2 != "") first[$1] = $2
+		  if (!seen[$1 SUBSEP $3]++) p[$1] = p[$1] "\n  tried: " substr($3, 1, 110)
+		  if ($2 == "") nodate[$1] = 1
+		  else if (inst != "" && $2 < inst) before[$1] = 1 }
 		END { for (i = 1; i <= k; i++) { ip = order[i]
-			printf "%-16s %d attempt(s)  %s .. %s UTC%s%s\n", ip, n[ip], first[ip], last[ip],
-				(before[ip] ? "  <- BEFORE the fixed build was running" : ""), p[ip] } }' "$T/att" > "$T/f"
+			when = (first[ip] != "") ? substr(first[ip], 1, 16) " .. " substr(last[ip], 1, 16) " UTC" : "date unknown"
+			printf "%-16s %d attempt(s)  %s%s%s%s\n", ip, n[ip], when,
+				(before[ip] ? "  <- BEFORE the fixed build was running" : ""),
+				(inst != "" && nodate[ip] ? "  <- date unknown: could be BEFORE the fix" : ""), p[ip] } }' "$T/att" > "$T/f"
 		: > "$T/injections"
 		grep -q 'BEFORE the fixed build' "$T/f" && : > "$T/before-fix"
+		grep -q 'date unknown: could be BEFORE' "$T/f" && : > "$T/undated"
 
 		# Files the attacker tried to create in web folders: do they exist now?
 		cut -f3 "$T/att" | grep -oE '/(var/netscaler/(logon|gui)|netscaler/ns_gui|var/vpn)/[^] `;$|>"<'"'"'()[]+' |
@@ -422,8 +459,8 @@ done
 				# counts if it came after the first attempt: the same name may
 				# have been served long before (an old file, another admin).
 				awk -v u="$u" -v first="$first" "$AWKTIME"'
-					BEGIN { fa = -1; if (first != "") fa = mins(substr(first, 1, 4) + 0, substr(first, 6, 2) + 0,
-						substr(first, 9, 2) + 0, substr(first, 12, 2) + 0, substr(first, 15, 2) + 0) }
+					BEGIN { fa = -1; if (first != "") fa = secs(substr(first, 1, 4) + 0, substr(first, 6, 2) + 0,
+						substr(first, 9, 2) + 0, substr(first, 12, 2) + 0, substr(first, 15, 2) + 0, substr(first, 18, 2) + 0) }
 					match($0, /"[A-Z]+ [^ "]+ [^"]*" [0-9]+ [0-9-]+/) {
 						split(substr($0, RSTART, RLENGTH), a, " "); path = a[2]; sub(/\?.*/, "", path)
 						if (path != u) next
@@ -433,11 +470,11 @@ done
 							if (match($0, /\[[0-9]+\/[A-Za-z]+\/[0-9]+:[0-9]+:[0-9]+:[0-9]+ [-+][0-9]+\]/)) {
 								d = substr($0, RSTART + 1, RLENGTH - 2); split(d, x, /[\/: ]/)
 								off = substr(x[7], 2, 2) * 60 + substr(x[7], 4, 2); if (substr(x[7], 1, 1) == "-") off = -off
-								if (mon(x[2]) >= 1) t = mins(x[3] + 0, mon(x[2]), x[1] + 0, x[4] + 0, x[5] + 0) - off
+								if (mon(x[2]) >= 1) t = secs(x[3] + 0, mon(x[2]), x[1] + 0, x[4] + 0, x[5] + 0, x[6] + 0) - off * 60
 							}
 							line = d "  " $1 "  status " a[4] ", " a[5] " bytes  " u
-							if (fa < 0 || t < 0) print "UNK\t" line
-							else if (t >= fa) print "DL\t" line
+							if (fa < 0 || t < 0 || t == fa) print "UNK\t" line
+							else if (t > fa) print "DL\t" line
 							else old++
 						}
 					}
@@ -519,12 +556,12 @@ done
 	if [ $# -gt 0 ]; then
 		find "$@" -type f \( -name '*.php' -o -name '*.php?' -o -name '*.phtml' -o -name '*.pl' \
 			-o -name '*.py' -o -name '*.sh' \) ! -path '*/admin_ui/*' ! -name 'eula_upgrade.pl' 2>>"$E" | list > "$T/f"
-		grep -rlIE '<\?(php|=)' "$@" 2>>"$E" | grep -v -e '/admin_ui/' -e '\.php$' | list >> "$T/f"
+		find "$@" -type f -exec grep -lIE '<\?(php|=)' {} + 2>>"$E" | grep -v -e '/admin_ui/' -e '\.php$' | list >> "$T/f"
 	fi
 	# webshell calls where no PHP or scripts belong (renamed .ctxs.receiver copies)
 	# shellcheck disable=SC2046
 	set -- $(dirs "/var/netscaler/logon/LogonPoint/custom /var/vpn")
-	[ $# -gt 0 ] && grep -rlE 'passthru[[:space:]]*\(|NSC_TASS' "$@" 2>>"$E" | list >> "$T/f"
+	[ $# -gt 0 ] && find "$@" -type f -exec grep -lE 'passthru[[:space:]]*\(|NSC_TASS' {} + 2>>"$E" | list >> "$T/f"
 	sort -u -o "$T/f" "$T/f"
 	finding COMPROMISE "Script or PHP code in a web folder (possible web shell)" "$T/f"
 ) || { echo "[SKIPPED] check 4 (Web shells) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
@@ -567,11 +604,14 @@ done
 			# paths; libraries mention w3.org namespace URLs.
 			# RS=\001 makes the whole file one record, so a call split over
 			# several lines is still seen together with its URL.
-			host=$(LC_ALL=C awk 'BEGIN { RS = "\001" } {
+			# URLs with a scheme (https://host) and protocol-relative ones in
+			# quotes ("//host.tld/...")
+			host=$(LC_ALL=C awk -v q="'" 'BEGIN { RS = "\001"; re = "(https?:\\/\\/|[\"" q "`]\\/\\/)[A-Za-z0-9.-]+" } {
 				rest = $0; off = 0
-				while (match(rest, /https?:\/\/[A-Za-z0-9.-]+/)) {
+				while (match(rest, re)) {
 					pos = off + RSTART; len = RLENGTH
-					h = tolower(substr($0, pos, len)); sub(/^https?:\/\//, "", h)
+					h = tolower(substr($0, pos, len)); sub(/^(https?:)?[^\/]*\/\//, "", h)
+					if (h !~ /\./ && h != "localhost") { off = pos + len - 1; rest = substr($0, off + 1); continue }
 					off = pos + len - 1; rest = substr($0, off + 1)
 					if (h ~ /^(localhost|127\.0\.0\.1|(www\.)?w3\.org)$/) continue
 					st = pos - 300; if (st < 1) st = 1
@@ -583,8 +623,10 @@ done
 				printf '%s  %s  (sends data to %s - open the file and search for it)\n' "$(when "$f")" "${f#$R}" "$host"
 			fi
 		done > "$T/f"
-		find "$@" -type f \( -name '*.html' -o -name '*.htm' \) \
-			-exec grep -lE "<script[^>]+src=[\"']?https?://" {} + 2>>"$E" | list |
+		# a <script ... src=http...> tag, also split over several lines
+		find "$@" -type f \( -name '*.html' -o -name '*.htm' \) -exec awk -v q="'" '
+			BEGIN { RS = "\001"; re = "<[Ss][Cc][Rr][Ii][Pp][Tt][^>]+[Ss][Rr][Cc][[:space:]]*=[[:space:]]*[\"" q "]?(https?:)?//" }
+			$0 ~ re { print FILENAME }' {} + 2>>"$E" | list |
 			sed 's/$/  (loads a script from an external site)/' >> "$T/f"
 	fi
 	finding REVIEW "Login page code that may steal passwords - open these files and look" "$T/f"
@@ -595,11 +637,38 @@ done
 	: > "$T/f"
 	# shellcheck disable=SC2046
 	set -- $(dirs "/ /var /flash")
-	[ $# -gt 0 ] && find "$@" -xdev -type f \( -perm -4000 -o -perm -2000 \) 2>>"$E" |
+	# a setuid/setgid bit only matters on a file that can be executed
+	[ $# -gt 0 ] && find "$@" -xdev -type f \( -perm -4000 -o -perm -2000 \) \( -perm -0100 -o -perm -0010 -o -perm -0001 \) 2>>"$E" |
 		sed "s|^$R||" | sort -u |
-		grep -v -E '^/(bin|sbin|usr/bin|usr/sbin|usr/libexec|usr/local/bin|usr/local/sbin)/|^/netscaler/(ping6?|traceroute6?)$|^/var/configd_devno$|^/var/run/.*\.pid$' |
+		grep -v -E '^/(bin|sbin|usr/bin|usr/sbin|usr/libexec|usr/local/bin|usr/local/sbin)/|^/netscaler/(ping6?|traceroute6?)$|^/var/configd_devno$|^/var/nslog/(nslog\.nextfile|newnslog[^/]*)$|^/var/run/.*\.pid$' |
 		while IFS= read -r f; do printf '%s  %s\n' "$(when "$R$f")" "$f"; done > "$T/f"
 	finding COMPROMISE "Unknown setuid/setgid programs (possible root backdoor)" "$T/f"
+	# The system folders are skipped above because they hold the standard ones.
+	# They are rebuilt from the firmware at every boot: a setuid/setgid program
+	# there that changed after the boot is COMPROMISE. One that is not part of
+	# standard FreeBSD is only REVIEW - NetScaler may add its own; compare with
+	# a clean box on the same build.
+	: > "$T/f2"; : > "$T/f3"
+	[ -n "$bs" ] && touch -t "$(date -r $((bs + 900)) +%Y%m%d%H%M.%S)" "$T/booted" 2>/dev/null
+	# shellcheck disable=SC2046
+	set -- $(dirs "/bin /sbin /usr/bin /usr/sbin /usr/libexec /usr/local/bin /usr/local/sbin")
+	[ $# -gt 0 ] && find "$@" -maxdepth 2 -type f \( -perm -4000 -o -perm -2000 \) 2>>"$E" | while IFS= read -r f; do
+		if [ -f "$T/booted" ] && [ -n "$(find "$f" -newer "$T/booted" 2>/dev/null)" ]; then
+			printf '%s  %s  (changed after the last boot)\n' "$(when "$f")" "${f#$R}" >> "$T/f3"
+		else
+			case "${f##*/}" in
+			at|atq|atrm|batch|chfn|chpass|chsh|crontab|lock|login|lpq|lpr|lprm|opieinfo|opiepasswd|passwd|quota|\
+			rlogin|rsh|su|yppasswd|ypchfn|ypchpass|ypchsh|rcp|ping|ping6|shutdown|poweroff|mksnap_ffs|authpf|ppp|\
+			timedc|traceroute|traceroute6|trpt|ssh-keysign|ulog-helper|dma|dma-mbox-create|sendmail|fstat|netstat|\
+			wall|write|btsockstat|lpc|procstat|w|top|dmesg|iostat|vmstat|systat|pstat|swapinfo|sockstat|ipcs|kgdb) ;;
+			# shells and interpreters: check 14 reports those as COMPROMISE
+			sh|bash|dash|csh|tcsh|ksh|zsh|python*|perl*|php*|nc|busybox) ;;
+			*) printf '%s  %s\n' "$(when "$f")" "${f#$R}" >> "$T/f2" ;;
+			esac
+		fi
+	done
+	finding COMPROMISE "Setuid/setgid program in a system folder changed after the last boot (folders come from the firmware)" "$T/f3"
+	finding REVIEW "Setuid/setgid programs in system folders that are not part of standard FreeBSD - compare with a clean box" "$T/f2"
 ) || { echo "[SKIPPED] check 8 (Unknown setuid/setgid programs) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 9. User crontabs ------------------------------------------------------
@@ -608,17 +677,26 @@ done
 	[ -d "$R/var/cron/tabs" ] && find "$R/var/cron/tabs" -type f 2>>"$E" | list > "$T/f"
 	# system crontab lines that download from anywhere but the box itself
 	[ -f "$R/etc/crontab" ] && grep -nE 'curl|wget|fetch[[:space:]]' "$R/etc/crontab" 2>>"$E" | grep -v '^[0-9]*:[[:space:]]*#' |
-		grep -vE '(curl|wget|fetch)[^|;&]*[[:space:]]"?(https?://)?(localhost|127\.0\.0\.1)([:/"[:space:]]|$)' |
+		# every download command on the line counts: one to localhost does not
+		# hide another one to the internet
+		awk '{ keep = 0; n = split($0, seg, /;|&&|\|/)
+			for (i = 1; i <= n; i++) { x = seg[i]; if (x !~ /(curl|wget|fetch)/) continue
+				if (x ~ /[a-z]+:\/\//) {
+					while (match(x, /[a-z]+:\/\/[^\/:" ]+/)) { h = substr(x, RSTART, RLENGTH); sub(/^[a-z]+:\/\//, "", h)
+						if (h !~ /^(localhost|127\.)/) keep = 1; x = substr(x, RSTART + RLENGTH) }
+				} else if (x !~ /localhost|127\.0\.0\.1/) keep = 1 }
+			if (keep) print }' |
 		redact | sed 's|^|/etc/crontab:|' >> "$T/f"
 	finding REVIEW "Crontabs that run user jobs or downloads (attackers use these to come back)" "$T/f"
-	# user cron jobs that delete or empty logs and files: trace wiping (Beazley).
-	# NetScaler's own jobs live in /etc/crontab and are not looked at here.
+	# user cron jobs that delete or empty logs, shell history or web files:
+	# trace wiping (Beazley). Cleaning up temp files is not. NetScaler's own
+	# jobs live in /etc/crontab and are not looked at here.
 	: > "$T/f2"
 	[ -d "$R/var/cron/tabs" ] && for t in "$R"/var/cron/tabs/*; do
 		[ -f "$t" ] || continue
 		grep -nE -v '^[[:space:]]*(#|$)' "$t" 2>>"$E" |
-			grep -E '(rm[[:space:]]+-|rm[[:space:]]+/|truncate|find[^|;]*-delete|find[^|;]*-exec[[:space:]]+rm|(^|[^0-9>])>[[:space:]]*/var/(log|nslog|tmp|core)|cat[[:space:]]+/dev/null[[:space:]]*>)' |
-			grep -E '/var/log|/var/nslog|/var/tmp|/tmp|/var/core|/var/netscaler|/netscaler|/var/vpn|history|\.log' |
+			grep -E '(rm[[:space:]]+-|rm[[:space:]]+/|truncate|find[^|;]*-delete|find[^|;]*-exec[[:space:]]+rm|(^|[^0-9>])>[[:space:]]*/var/(log|nslog|core)|cat[[:space:]]+/dev/null[[:space:]]*>)' |
+			grep -E '/var/log|/var/nslog|/var/core|history|/var/netscaler/logon|/netscaler/ns_gui|/var/vpn' |
 			redact | cut -c1-200 | sed "s|^|${t#$R}:|"
 	done >> "$T/f2"
 	finding COMPROMISE "User cron jobs that delete or empty logs and files (wiping traces)" "$T/f2"
@@ -667,10 +745,20 @@ done
 
 # --- 11. Web server config: PHP handlers and aliases (WHIPSHOT) ------------
 (
-	for c in /etc/httpd.conf /flash/nsconfig/httpd.conf /nsconfig/httpd.conf; do
-		[ -f "$R$c" ] || continue
-		# /nsconfig is normally a link to /flash/nsconfig: read it once
-		[ "$c" = /nsconfig/httpd.conf ] && [ -f "$R/flash/nsconfig/httpd.conf" ] && continue
+	# the main configs plus files they pull in with Include / IncludeOptional
+	{
+		for c in /etc/httpd.conf /flash/nsconfig/httpd.conf /nsconfig/httpd.conf; do
+			[ -f "$R$c" ] || continue
+			# /nsconfig is normally a link to /flash/nsconfig: read it once
+			[ "$c" = /nsconfig/httpd.conf ] && [ -f "$R/flash/nsconfig/httpd.conf" ] && continue
+			printf '%s\n' "$c"
+			sed -n -E 's/^[[:space:]]*[Ii]nclude([Oo]ptional)?[[:space:]]+"?([^"[:space:]]+)"?.*/\2/p' "$R$c" 2>>"$E" |
+				while IFS= read -r inc; do
+					case "$inc" in /*) for x in "$R"$inc; do [ -f "$x" ] && printf '%s\n' "${x#$R}"; done ;; esac
+				done
+		done
+	} | awk '!seen[$0]++' > "$T/confs"
+	while IFS= read -r c; do
 		awk -v f="$c" '
 			# phponly(<files...> header): its pattern names only php/phtml
 			# Accepted: <Files *.php>, <Files *.phtml> and regexes like \.php$,
@@ -681,8 +769,11 @@ done
 				return s ~ /^\^?(\.[*+])?\\\.(php[0-9]?|phtml|\((php[0-9]?|phtml)(\|(php[0-9]?|phtml))*\))\$$/
 			}
 			{ l = tolower($0) }
-			l ~ /^[ \t]*<(files|filesmatch|location|locationmatch|directory|directorymatch)[ \t>]/ { sect = l; head = $0; sub(/^[ \t]+/, "", head) }
-			l ~ /^[ \t]*<\/(files|filesmatch|location|locationmatch|directory|directorymatch)>/ { sect = "" }
+			# sections nest (<Files> inside <Directory>): keep a stack
+			l ~ /^[ \t]*<(files|filesmatch|location|locationmatch|directory|directorymatch)[ \t>]/ {
+				sect = l; head = $0; sub(/^[ \t]+/, "", head); stk[++dep] = sect; hst[dep] = head }
+			l ~ /^[ \t]*<\/(files|filesmatch|location|locationmatch|directory|directorymatch)>/ {
+				if (dep > 0) dep--; sect = (dep > 0) ? stk[dep] : ""; head = (dep > 0) ? hst[dep] : "" }
 			# PHP handler for anything but .php/.phtml (e.g. .deb, .sig)
 			l ~ /^[ \t]*add(handler|type)[ \t]+"?application\/x-httpd-php"?([ \t]|$)/ {
 				for (i = 3; i <= NF; i++) { e = tolower($i); gsub(/"/, "", e)
@@ -720,7 +811,7 @@ done
 				else print "CHECK\t" f ":" NR ": " $0 "  [in " head "]" }
 			l ~ /#[ \t]*(require all denied|php_flag engine off)/ { print "CHECK\t" f ":" NR ": " $0 "  (protection commented out)" }
 		' "$R$c" 2>>"$E"
-	done > "$T/conf"
+	done < "$T/confs" > "$T/conf"
 	# strip only the level prefix: config lines may contain tabs themselves
 	awk 'sub(/^HIGH\t/, "")' "$T/conf" > "$T/f"
 	awk 'sub(/^CHECK\t/, "")' "$T/conf" > "$T/f2"
@@ -749,7 +840,10 @@ done
 	: > "$T/f2"
 	for c in /flash/nsconfig/nsafter.sh /nsconfig/nsafter.sh; do
 		[ -f "$R$c" ] || continue
-		grep -niE '/var/netscaler/logon|/netscaler/ns_gui|/var/vpn|/var/netscaler/gui|httpd\.conf|chmod[[:space:]]+[ug]?\+?s([[:space:]]|$)|chmod[[:space:]]+0?[4-7][0-7]{3}[[:space:]]|python[0-9.]*[[:space:]]+-c|b64decode|base64[[:space:]]+-d|(^|[^a-z])nc[[:space:]]+-' \
+		# a write into the web folders or httpd.conf (cp/mv/ln/install/tee, a
+		# redirect, sed -i / perl -i), setuid, decoders - reading is fine
+		W='(/var/netscaler/logon|/netscaler/ns_gui|/var/vpn|/var/netscaler/gui|httpd\.conf)'
+		grep -niE "(cp|mv|ln|install|tee)[^;|&]*$W|>[[:space:]]*[\"']?[^;|&[:space:]]*$W|(sed|perl)[[:space:]][^;|&]*-[a-z]*i[^;|&]*$W|chmod[[:space:]]+[ug]?\\+?s([[:space:]]|\$)|chmod[[:space:]]+0?[4-7][0-7]{3}[[:space:]]|python[0-9.]*[[:space:]]+-c|b64decode|base64[[:space:]]+-d|(^|[^a-z])nc[[:space:]]+-" \
 			"$R$c" 2>>"$E" | grep -v '^[0-9]*:[[:space:]]*#' | redact | cut -c1-200 | sed "s|^|$c:|"
 		break
 	done > "$T/f2"
@@ -771,7 +865,7 @@ done
 	# shellcheck disable=SC2046
 	set -- $(dirs "/var/netscaler/gui/vpn/scripts/linux /netscaler/ns_gui/vpn/scripts/linux /var/netscaler/gui/vpns/scripts/vista /var/netscaler/gui/vpns/scripts/mac /netscaler/ns_gui/vpn/media")
 	[ $# -gt 0 ] && find "$@" -maxdepth 1 -type f 2>>"$E" | while IFS= read -r f; do
-		if [ "$(head -c 2 "$f" 2>>"$E")" = '#!' ] || grep -qIE '<\?|eval[[:space:]]*\(|base64_decode[[:space:]]*\(|shell_exec[[:space:]]*\(' "$f" 2>>"$E"; then
+		if [ "$(head -c 2 "$f" 2>>"$E")" = '#!' ] || grep -qIE '<\?(php|=|[[:space:]])|eval[[:space:]]*\(|base64_decode[[:space:]]*\(|shell_exec[[:space:]]*\(' "$f" 2>>"$E"; then
 			printf '%s\n' "$f" >&3
 		elif [ "$(head -c 7 "$f" 2>>"$E")" != '!<arch>' ] && grep -qI . "$f" 2>>"$E"; then
 			case "$f" in *.xml|*.js|*.css|*.html|*.htm|*.json|*.svg|*.map|*.txt) ;; *) printf '%s\n' "$f" ;; esac
@@ -786,7 +880,7 @@ done
 	[ $# -gt 0 ] && find "$@" -maxdepth 1 -type f -name '*.sig' 2>>"$E" | list |
 		sed 's/$/  (.sig file - WHIPSHOT is served as <name>.sig)/' >> "$T/f2"
 	# theme folder: CSS and images are normal, PHP is not
-	[ -d "$R/var/vpn/theme" ] && grep -rlE '<\?php|base64_decode[[:space:]]*\(|shell_exec[[:space:]]*\(' "$R/var/vpn/theme" 2>>"$E" | list |
+	[ -d "$R/var/vpn/theme" ] && find "$R/var/vpn/theme" -type f -exec grep -lE '<\?php|base64_decode[[:space:]]*\(|shell_exec[[:space:]]*\(' {} + 2>>"$E" | list |
 		sed 's/$/  (PHP code in the VPN theme folder)/' >> "$T/f"
 	sort -u -o "$T/f" "$T/f"
 	finding COMPROMISE "Disguised files in web folders (fake .deb packages, scripts among client packages)" "$T/f"
@@ -919,7 +1013,7 @@ done
 		echo "$(wc -l < "$T/crash" | tr -d ' ') packet engine crash / DTLS failure log line(s) in the last 14 days, newest:" >> "$T/f"
 		tail -3 "$T/crash" | cut -c1-200 | sed 's/^/  /' >> "$T/f"
 	fi
-	finding REVIEW "Packet engine crashes in the last 14 days (CVE-2026-88772 exploits crash it)" "$T/f"
+	finding REVIEW "Packet engine and other process crashes (core dumps, crash log lines) in the last 14 days - CVE-2026-88772 exploits crash the packet engine" "$T/f"
 	# A failed DTLS handshake followed within 10 minutes by a packet engine crash
 	# is how successful CVE-2026-88772 exploitation looked (Mandiant). Both log
 	# files start with the box's local syslog time, so compare that.
@@ -953,7 +1047,8 @@ done
 		grep -oE "$IPS" | sort | uniq -c |
 		awk '{ printf "%-16s %d log line(s)%s\n", $2, $1, ($2 ~ /^104\.28\./ ? "  (Cloudflare WARP - also used by ordinary WARP users)" : "") }' > "$T/f"
 	# attacker domains (IFIN, Arctic Wolf)
-	{ logs; logs messages; alogs; } | grep -v 'shell_command=' | grep -oE 'echvista\.com|entretiensol\.com' |
+	{ logs; logs messages; alogs; } | grep -v 'shell_command=' |
+		grep -oE '(^|[^A-Za-z0-9-])([A-Za-z0-9-]+\.)*(echvista\.com|entretiensol\.com)([^A-Za-z0-9.-]|$)' | grep -oE 'echvista\.com|entretiensol\.com' |
 		sort | uniq -c | awk '{ printf "%-16s %d log line(s)  (attacker domain)\n", $2, $1 }' >> "$T/f"
 	finding ATTEMPT "Known attacker IP addresses in the logs" "$T/f"
 	# Opportunistic scanners GreyNoise tagged after the public PoC (via
@@ -999,11 +1094,18 @@ done
 			-o -name 'nsgser18.deb' -o -name 'nsgsupport.deb' -o -name 'nsgpackage64.deb' -o -name 'nsgbuild.deb' \
 			-o -name 'nsg64.deb' \) 2>>"$E"
 	done | list | sed 's/$/  (a name the web shells used - compare its SHA-256 with a clean box)/' > "$T/f5"
-	# output of "id" written to a file = proof an injected command ran
+	# Output of "id" (or an exploit canary) in a web folder the attacker can
+	# read back = an injected command ran. In the temp folders it can just as
+	# well be someone's test or diagnostic, so there it is only REVIEW.
+	: > "$T/f6"
 	# shellcheck disable=SC2046
-	set -- $(dirs "/tmp /var/tmp /var/vpn /var/netscaler/logon /netscaler/ns_gui/vpn")
+	set -- $(dirs "/var/vpn /var/netscaler/logon /netscaler/ns_gui/vpn")
 	[ $# -gt 0 ] && find "$@" -maxdepth 3 -type f -size -2k -exec grep -lE 'uid=[0-9]+\([a-z_]+\) gid=|NX-CVE-OK' {} + 2>>"$E" |
 		list | sed 's/$/  (contains output of the id command or an exploit canary)/' >> "$T/f"
+	# shellcheck disable=SC2046
+	set -- $(dirs "/tmp /var/tmp")
+	[ $# -gt 0 ] && find "$@" -maxdepth 3 -type f -size -2k -exec grep -lE 'uid=[0-9]+\([a-z_]+\) gid=|NX-CVE-OK' {} + 2>>"$E" |
+		grep -v -e '/results-nshunt' -e '/\.results-nshunt' | list | sed 's/$/  (contains output of the id command)/' >> "$T/f6"
 	# An archive disguised as a web file: how a stolen /flash/nsconfig is staged
 	# for download. grep -l finds files containing a gzip/zip/tar signature
 	# anywhere (one pass); each hit is then checked at the right offset.
@@ -1020,6 +1122,7 @@ done
 	done >> "$T/f"
 	finding COMPROMISE "Files written by the published exploit payloads (do not open them on the box - they may hold config data)" "$T/f"
 	finding REVIEW "Client packages named like known web shells" "$T/f5"
+	finding REVIEW "Output of the id command in temp folders - a test, a diagnostic or an injected command" "$T/f6"
 ) || { echo "[SKIPPED] check 19 (Exploit payload files) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 20. Exploit, scanner and probe strings in the web logs ----------------
@@ -1027,9 +1130,9 @@ done
 	# errlogs: every httperror*.log* rotation, unzipped
 	# vlogs: the Gateway's own access log (httpaccess-vpn*), unzipped
 	vlogs() { for f in "$R"/var/log/httpaccess-vpn*.log "$R"/var/log/httpaccess-vpn*.log.*; do
-		[ -f "$f" ] || continue; case "$f" in *.gz) gzip -dc "$f" ;; *) cat "$f" ;; esac; done 2>/dev/null; }
+		[ -f "$f" ] && rd "$f"; done; }
 	errlogs() { for f in "$R"/var/log/httperror*.log "$R"/var/log/httperror*.log.*; do
-		[ -f "$f" ] || continue; case "$f" in *.gz) gzip -dc "$f" ;; *) cat "$f" ;; esac; done 2>/dev/null; }
+		[ -f "$f" ] && rd "$f"; done; }
 	# sum <label> [noip]: stdin log lines -> "label: N line(s), status 404 x3" and
 	# the client IPs. Web log lines start with the client IP, error log lines
 	# say "client IP"; 127.0.0.x is the NetScaler itself forwarding the request.
@@ -1093,10 +1196,12 @@ done
 	# this script's own logged commands never match them; searches run with
 	# grep/awk (by you or other scanners) are skipped too.
 	for f in "$R"/var/log/sh.log "$R"/var/log/sh.log.* "$R"/var/log/bash.log "$R"/var/log/bash.log.*; do
-		[ -f "$f" ] || continue; case "$f" in *.gz) gzip -dc "$f" ;; *) cat "$f" ;; esac
-	done 2>/dev/null |
+		[ -f "$f" ] && rd "$f"
+	done |
 		grep -E 'l[d]apsearch|o[p]enssl[[:space:]]+s_client|/flash/nsconfig/k[e]ys|F[12][.]k[e]y|d[a]tabase[.]php|L[D]APTLS_REQCERT|c[p][[:space:]]+/usr/bin/bash|d[e]l[[:space:]]+/etc/auth[.]conf|h[t]tpd[[:space:]]+-k[[:space:]]+restart|c[h]mod[[:space:]]+[ug]?[+]s|n[s]shutdown[[:space:]]+-R|c[h]mod[[:space:]]+0?[4-7][0-7]{3}[[:space:]]+/bin/|k[i]ll[[:space:]]+-HUP[^"]*httpd' |
 		grep -vE 'sh_command="[[:space:]]*(z?[ef]?grep|awk|sed|find|ls)[[:space:]]' | redact | cut -c1-200 > "$T/h"
+	# the NetScaler CLI "reboot" runs "nsshutdown -R -D ..." - normal, but check the time
+	sed 's/\(nsshutdown -R -D .*\)$/\1  (a reboot from the CLI looks like this - match it with your change records)/' "$T/h" > "$T/h2" && mv "$T/h2" "$T/h"
 	n=$(wc -l < "$T/h" | tr -d ' ')
 	{ [ "$n" -gt 10 ] && echo "... $((n - 10)) older line(s) not shown"; tail -10 "$T/h"; } > "$T/f"
 	finding REVIEW "Shell commands that read credentials or keys, restart the web server, set setuid or force a reboot - check who ran them" "$T/f"
@@ -1114,7 +1219,8 @@ done
 	for d in /tmp /var/tmp; do
 		[ -d "$R$d" ] || continue
 		find "$R$d" -maxdepth 1 -type f -size +0 2>>"$E" | while IFS= read -r f; do
-			case "${f##*/}" in results-nshunt*|nshunt*) continue ;; esac
+			# results-nshunt*, nshunt*; .shrun.cache is NetScaler's own "show running" cache
+			case "${f##*/}" in results-nshunt*|nshunt*|.shrun.cache) continue ;; esac
 			grep -qE '^#NS[0-9]+\.[0-9]+ Build|^(add|set) (ns ip|ns config|system user|ns hostName) ' "$f" 2>/dev/null || continue
 			case "${f##*/}" in
 			c1.txt|c2.txt) printf '%s  %s  (running config dump - name used by the payload)\n' "$(when "$f")" "${f#$R}" ;;
@@ -1145,13 +1251,24 @@ done
 	# while a script on the box (cli_script.sh / nscli, like the payload) logs
 	# 127.0.0.1. A script adding admins or letting EPA failures through is the
 	# payload; the same commands from an admin PC only need confirming.
-	grep -E '\(the box itself - a script\): ((add|bind) system user|.*NO_AUTH)' "$T/cmd" > "$T/cmdhi"
-	grep -v -E '\(the box itself - a script\): ((add|bind) system user|.*NO_AUTH)' "$T/cmd" > "$T/cmdlo"
+	# Admins also run cli_script.sh on the shell, so one such command alone is
+	# REVIEW. COMPROMISE needs two of the payload's traces together: a script
+	# adding/binding an admin, a script switching EPA to NO_AUTH, the c1/c2 dumps.
+	sig=0
+	grep -qE '\(the box itself - a script\): (add|bind) system user' "$T/cmd" && sig=$((sig + 1))
+	grep -qE '\(the box itself - a script\): .*NO_AUTH' "$T/cmd" && sig=$((sig + 1))
+	[ -s "$T/f" ] && sig=$((sig + 1))
+	if [ "$sig" -ge 2 ]; then
+		grep -E '\(the box itself - a script\): ((add|bind) system user|.*NO_AUTH)' "$T/cmd" > "$T/cmdhi"
+		grep -v -E '\(the box itself - a script\): ((add|bind) system user|.*NO_AUTH)' "$T/cmd" > "$T/cmdlo"
+	else
+		: > "$T/cmdhi"; cp "$T/cmd" "$T/cmdlo"
+	fi
 	for x in cmdhi cmdlo; do
 		n=$(wc -l < "$T/$x" | tr -d ' ')
 		{ [ "$n" -gt 15 ] && echo "... $((n - 15)) older line(s) not shown"; tail -15 "$T/$x"; } > "$T/$x.f"
 	done
-	finding COMPROMISE "A script on the box added admin accounts or let EPA failures through (a 2026 payload) - check the accounts below" "$T/cmdhi.f"
+	finding COMPROMISE "A script on the box added admin accounts and let EPA failures through or dumped the config (a 2026 payload) - check the accounts below" "$T/cmdhi.f"
 	finding REVIEW "Admin accounts created, EPA failures let through or EPA policies unbound - make sure the admin shown did this" "$T/cmdlo.f"
 
 	# Saved config: EPA failures let through, and admin accounts that are not
@@ -1174,7 +1291,7 @@ done
 		if [ -n "$old" ]; then
 			grep -E '^add system user ' "$R$c" | awk '{ print $4 }' | sort -u > "$T/unow"
 			grep -E '^add system user ' "$old" | awk '{ print $4 }' | sort -u > "$T/uold"
-			comm -23 "$T/unow" "$T/uold" | while IFS= read -r u; do
+			awk 'NR == FNR { old[$0]; next } !($0 in old)' "$T/uold" "$T/unow" | while IFS= read -r u; do
 				adm=$(grep -E "^bind system user $u (superuser|sysAdmin)" "$R$c" | awk '{ print $5 }' | head -1)
 				echo "system user $u${adm:+ (bound to $adm)} - added after ${old#$R} ($(when "$old"))"
 			done >> "$T/f4"
@@ -1200,16 +1317,19 @@ done
 	57f9f30c50240fd48d761de7961a430cdebf2c084a36bc76d376a1ce8e6dfa9d 974b69782fdf5d67b97cfd508465939e44ee10798dbcc1e82b92d78776bad938
 	927c7fbef2e620c1ce482c3ed67ebf53da97693c1d6c7552c77aec84ba982cf8 ae22ef2517b5c0fb47f78745b9cb5260acee0e751b89bcd354640ff8bc8d29ec
 	1bd314b661396c7086f6367fbbb48025e03ca2de69c073d53a8b0a38aa5fbb7d 79c65fa04541032e251fa4796b97800374b63c7982593dd1a2e0db605d429186"
+	# names with a line break cannot be read line by line (NetScaler's own
+	# bm_prefix_<base64> bookmarks have them); they are left out of the hashing
+	NL=$(printf '\n_'); NL=${NL%_}
 	PLACES="/var/netscaler/logon/LogonPoint/custom /var/vpn /var/netscaler/gui/vpn/scripts /var/netscaler/gui/vpns/scripts /netscaler/ns_gui/vpn/scripts /netscaler/ns_gui/vpn/media"
 	{
 		# shellcheck disable=SC2046
-		set -- $(dirs "$PLACES"); [ $# -gt 0 ] && find "$@" -type f -size -2000k 2>>"$E"
+		set -- $(dirs "$PLACES"); [ $# -gt 0 ] && find "$@" -type f -size -2000k ! -name "*$NL*" 2>>"$E"
 		# shellcheck disable=SC2046
-		set -- $(dirs "/tmp /var/tmp"); [ $# -gt 0 ] && find "$@" -maxdepth 3 -type f -size -2000k 2>>"$E"
+		set -- $(dirs "/tmp /var/tmp"); [ $# -gt 0 ] && find "$@" -maxdepth 3 -type f -size -2000k ! -name "*$NL*" 2>>"$E"
 		# shellcheck disable=SC2046
-		set -- $(dirs "/ /var"); [ $# -gt 0 ] && find "$@" -maxdepth 1 -type f -size -2000k 2>>"$E"
+		set -- $(dirs "/ /var"); [ $# -gt 0 ] && find "$@" -maxdepth 1 -type f -size -2000k ! -name "*$NL*" 2>>"$E"
 	} | grep -v -e '/nshunt\.' -e 'results-nshunt' | while IFS= read -r f; do
-		x=$(h256 "$f" 2>/dev/null)
+		x=$(h256 "$f" 2>>"$E")
 		case " $(echo $H) " in *" $x "*) [ -n "$x" ] && printf '%s  %s  (known web shell / payload SHA-256)\n' "$(when "$f")" "${f#$R}" ;; esac
 	done > "$T/f"
 	# Code markers where packages and theme files live:
@@ -1219,12 +1339,18 @@ done
 	# shellcheck disable=SC2046
 	set -- $(dirs "$PLACES")
 	if [ $# -gt 0 ]; then
-		find "$@" -type f -size -2000k -exec env LC_ALL=C grep -la -e 'HTTP_X_UX' -e '7489a0f93c67fa5cdaeb4b921d90594d' \
+		find "$@" -type f -size -2000k -exec env LC_ALL=C grep -la -e '7489a0f93c67fa5cdaeb4b921d90594d' \
 			-e 'Rhfajaf1H992' -e 'e826d7ddf3c85920' -e '.ns_suidcmd' {} + 2>>"$E"
+		# WHIPSHOT's header name counts where code reads it ($_SERVER, getenv, <?php)
+		find "$@" -type f -size -2000k -exec env LC_ALL=C grep -la 'HTTP_X_UX' {} + 2>>"$E" |
+			while IFS= read -r f; do
+				if LC_ALL=C grep -qaE '<\?php|<\?=|\$_SERVER|getenv' "$f"; then printf '%s\n' "$f"; else printf '%s\n' "$f" >> "$T/xux"; fi
+			done
 		find "$@" -type f -size -2000k -exec env LC_ALL=C grep -laE 'HTTP_NSC_(CLIENTTYPE|LDAP)' {} + 2>>"$E" |
 			while IFS= read -r f; do LC_ALL=C grep -qaE 'eval|base64_decode|assert|system|passthru|shell_exec' "$f" && printf '%s\n' "$f"; done
 	fi | sort -u | list | sed 's/$/  (web shell code: WHIPSHOT headers or the Unit 42 web shell)/' >> "$T/f"
 	finding COMPROMISE "Known web shells and payloads (by SHA-256 or by their code)" "$T/f"
+	[ -f "$T/xux" ] && list < "$T/xux" > "$T/f3" && finding REVIEW "Known web shells and payloads: a web shell header name (HTTP_X_UX) without code that reads it - open the file" "$T/f3"
 	# PHP / XHTML under /var/netscaler outside the management GUI, websocketd and
 	# the web folders checked above (Deyda): compare with a clean box
 	[ -d "$R/var/netscaler" ] && find "$R/var/netscaler" -type f \( -name '*.php' -o -name '*.xhtml' \) \
@@ -1288,6 +1414,10 @@ if [ "$a" -gt 0 ]; then
 		         echo "               The fixed build runs since $FIXUTC, but some"
 		         echo "               attempts came BEFORE that (marked above) - those could have"
 		         echo "               run. Check what they tried and whether it left traces."
+		     elif [ -f "$T/undated" ]; then
+		         echo "               The fixed build runs since $FIXUTC, but some attempts"
+		         echo "               have no readable date (marked above) - they could have come"
+		         echo "               before it. Check them in your SIEM."
 		     elif [ -n "$FIXUTC" ] && [ -f "$T/injections" ] && [ -n "$FIXGUESS" ]; then
 		         echo "               The fixed build was installed $FIXUTC and the injections"
 		         echo "               above came later - safe only if the box was rebooted right"
@@ -1325,6 +1455,6 @@ if [ $((h + a + c)) -eq 0 ]; then
 	echo "  None of the known signs of attack or compromise were found. That does not"
 	echo "  prove the box is clean - only these specific indicators were checked."
 fi
-if [ "$nbad" -gt 0 ] || [ "$sk" -gt 0 ] || [ "$nerr" -gt 0 ]; then exit 2; fi
+if [ "$nbad" -gt 0 ] || [ "$sk" -gt 0 ] || [ "$nerr" -gt 0 ] || [ -n "${NOSAVE:-}" ]; then exit 2; fi
 [ $((h + a + c)) -gt 0 ] && exit 1
 exit 0

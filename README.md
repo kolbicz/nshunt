@@ -19,7 +19,7 @@ scp nshunt.sh nsroot@<netscaler-ip>:/var/tmp/
 ssh nsroot@<netscaler-ip>
 shell
 cd /var/tmp
-sh nshunt.sh
+sh nshunt.sh --share
 ```
 
 Or download it directly on an appliance with internet access:
@@ -27,12 +27,14 @@ Or download it directly on an appliance with internet access:
 ```sh
 cd /var/tmp
 curl -O https://raw.githubusercontent.com/kolbicz/nshunt/main/nshunt.sh
-sh nshunt.sh
+sh nshunt.sh --share
 ```
 
 The output is shown on screen and saved to `results-nshunt.txt` in the current
 directory (`/var/tmp` survives a reboot, `/tmp` does not), readable by root
-only. Set `NSHUNT_OUT=/path/file` to save it elsewhere. Reports are written to
+only. `--share` also writes `results-nshunt-share.txt`, an anonymised copy that
+can leave your organisation (see *Sharing the output*); without `--share` only
+the full report is written. Set `NSHUNT_OUT=/path/file` to save it elsewhere. Reports are written to
 a new temp file and then moved into place; a symlink or directory at the report
 name is refused, not followed.
 
@@ -70,7 +72,7 @@ section that explains the result in plain words.
 Example:
 
 ```
-NetScaler quick hunt 1.7 - ns01 - 2026-09-30 14:43
+NetScaler quick hunt 1.8 - ns01 - 2026-09-30 14:43
 Build: 14.1-73.37 - includes the fix for CVE-2026-88771/88772
        fixed build running since 2026-09-28 11:55 UTC (first boot after the install; installed 2026-09-28 11:48 UTC)
 
@@ -110,7 +112,7 @@ Saved to: /var/tmp/results-nshunt.txt
 |------|---------|
 | `0`  | No findings |
 | `1`  | Findings |
-| `2`  | Scan **incomplete** - a log could not be read, a check crashed, or a file system error occurred - or the report file (or, with `--share`, the anonymised copy) could not be saved. Do not trust "no findings" with exit code 2. |
+| `2`  | Scan **incomplete** - a log or file could not be read, a check crashed, a tool the checks need is missing or does not work, or a file system error occurred - or the report file (or, with `--share`, the anonymised copy) could not be saved. Do not trust "no findings" with exit code 2. |
 
 If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still run.
 
@@ -120,7 +122,8 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
    with the public exploit's file name (`pwnpzi*`) or template code are `COMPROMISE`.
    Bookmarks last modified during the January 2020 mass-exploitation wave are
    `REVIEW`, labelled as empty stub or real bookmarks, because the date alone is
-   not proof. Files owned by `nobody` in `/netscaler/portal/templates` are `COMPROMISE`.
+   not proof. Exploit names and template code are also found in deeper
+   subfolders. Files owned by `nobody` in `/netscaler/portal/templates` are `COMPROMISE`.
 2. **Command injection through the VPN login** - failed logins and
    authentication requests in `ns.log*` whose user name contains shell syntax
    (`` ` ``, `${IFS}` also URL-encoded, `$(`, `| sh`) or a fake packet-engine
@@ -148,13 +151,20 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
 7. **Credential stealers in the login page** - JavaScript that contains an
    external URL next to code that captures or sends data (`password`, `fetch(`,
    `XMLHttpRequest`, `sendBeacon`, `atob`, `new Image`, ...), anywhere in the
-   file and across line breaks, plus HTML that loads scripts from external sites.
+   file and across line breaks, also protocol-relative URLs (`"//host/..."`),
+   plus HTML that loads scripts from external sites, also when the `<script>`
+   tag spans several lines.
    Stock Citrix code only talks to `localhost` or relative paths and is not flagged.
-8. **Unknown setuid/setgid programs** outside the standard system folders and
-   the NetScaler's own `ping`/`traceroute`.
+8. **Unknown setuid/setgid programs** - executable files with the setuid or
+   setgid bit outside the standard system folders, the NetScaler's own
+   `ping`/`traceroute` and its nslog data files (`COMPROMISE`). In the system
+   folders, which are rebuilt from the firmware at every boot, a setuid/setgid
+   program changed after the last boot is `COMPROMISE`; one that is not part of
+   standard FreeBSD is `REVIEW` (compare with a clean box).
 9. **Crontabs** - user crontabs in `/var/cron/tabs`, and `/etc/crontab` lines
-   that download from anywhere but the appliance itself. User cron jobs that
-   delete or empty logs and files (trace wiping) are `COMPROMISE`.
+   that download from anywhere but the appliance itself (every download on a
+   line counts). User cron jobs that delete or empty logs, shell history or web
+   files (trace wiping) are `COMPROMISE`; cleaning up temp files is not.
 10. **Unknown programs in temp folders** (`/tmp`, `/var/tmp`, `/var/nstmp`),
     excluding the NIC firmware tools and caches that NetScaler upgrades leave there,
     the NetScaler Console Security Advisory scan scripts, IoC scanners copied
@@ -165,7 +175,8 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     input (`eval(base64_decode(...))`, `exec(base64.b64decode(...))`,
     `$_POST` / `$_GET` into `eval`, `system`, `passthru`, ...) are `COMPROMISE`;
     other `eval(` / `shell_exec(` calls are marked for a look.
-11. **Web server config** (`/etc/httpd.conf`, `/flash/nsconfig/httpd.conf`) -
+11. **Web server config** (`/etc/httpd.conf`, `/flash/nsconfig/httpd.conf` and
+    the files they pull in with `Include` / `IncludeOptional`) -
     PHP handlers for non-PHP files such as `.deb` or `.sig`, and aliases that map
     an image or CSS URL (e.g. `/vpn/media/<hex>.ico`, `receiver.min.css`) onto a
     hidden, `.sig` or `.deb` file are `COMPROMISE` (WHIPSHOT persistence), as
@@ -173,12 +184,14 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     (`/vpn/media/`, `/vpn/theme/`, `/vpn/images/`, ...) onto `/vpn/scripts/`.
     A global `php_flag engine on` is `COMPROMISE` too: NetScaler ships with
     `php_flag engine off` and the attackers switch it on. Inside a `<Directory>`
-    or `<Files>` section, and commented-out protection lines, it is `REVIEW`.
+    or `<Files>` section (nested sections are tracked), and commented-out
+    protection lines, it is `REVIEW`.
 12. **Startup scripts** (`rc.netscaler`, `nsbefore.sh`, `nsafter.sh`) that run
     Python, base64 loaders, downloads or `chmod +s` at boot, and decoders,
     Python one-liners or reversed path strings in `ns.conf` and `/etc/rc`.
-    `nsafter.sh` writing into the web folders or `httpd.conf`, setting setuid or
-    decoding payloads is `COMPROMISE`.
+    `nsafter.sh` writing into the web folders or `httpd.conf` (`cp`, `mv`, a
+    redirect, `sed -i` ...), setting setuid or decoding payloads is
+    `COMPROMISE`; only reading them is not.
 13. **Disguised files** - `.deb` files in web folders that are not real packages
     (WHIPSHOT is a PHP web shell disguised as a `.deb`), scripts or PHP calls
     (`<?`, `eval(`, `base64_decode(`, `shell_exec(`) in the Gateway
@@ -220,8 +233,9 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     names (`/.x`, `/s`, `lula`, `/var/1.py`, `update_c*.pl`, `wtw*` /
     `watchTowr*` / `boom*` in `/tmp` and `/var/tmp`,
     `themes/wt88771*`, `nx_verify.html`, `c88771*`, `xua.html`, `/var/tmp/sh`,
-    `insight-new.js`, `admin_ui/e.txt` / `log.txt`), small files containing the
-    output of `id`, and gzip, zip or tar archives disguised as web files - how a
+    `insight-new.js`, `admin_ui/e.txt` / `log.txt`), small files in the web
+    folders containing the output of `id` (in `/tmp` / `/var/tmp` only `REVIEW` -
+    it may be someone's test), and gzip, zip or tar archives disguised as web files - how a
     stolen `/flash/nsconfig` is staged for download. Only name, size and date are
     shown, never the contents. Real packages that carry a name the web shells
     used (`nsg64.deb`, `nsgclient18.deb`, `nsgbuild.deb`, ...) are `REVIEW`:
@@ -256,19 +270,23 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     config to `/var/tmp/c1.txt` / `c2.txt` (and `labels.txt`) and saves the
     config. Those dumps are `COMPROMISE`; other running-config copies in the
     temp folders are `REVIEW` (they hold password hashes and secrets). In the
-    command log (`ns.log` `CMD_EXECUTED`) the source decides: a script on the box
-    itself (`Remote_ip 127.0.0.1`) adding or binding a system user or switching
-    EPA to `NO_AUTH` is `COMPROMISE`; the same from an admin PC (GUI, SSH, NITRO -
-    the line shows the admin and IP) and unbound EPA policies are `REVIEW`. The
+    command log (`ns.log` `CMD_EXECUTED`), commands run by a script on the box
+    itself (`Remote_ip 127.0.0.1`) are `COMPROMISE` when two of the payload's
+    traces come together - a script adding or binding a system user, a script
+    switching EPA to `NO_AUTH`, the `c1`/`c2` dumps. One of them alone, the same
+    commands from an admin PC (GUI, SSH, NITRO - the line shows the admin and IP)
+    and unbound EPA policies are `REVIEW`. The
     saved `ns.conf` is compared with the newest older copy from before August
     2026 (`ns.conf.NS<old build>` from an upgrade, `ns.conf.0-4`, `.bak`): system
     users added since, and `NO_AUTH` EPA actions, are `REVIEW`.
 23. **Known web shells and payloads by hash and code** - SHA-256 of published
     web shells and payloads (GreyNoise, IFIN, eSentire, Arctic Wolf, Unit 42) in
     the web, plugin and media folders, `/tmp`, `/var/tmp` and the top of `/` and
-    `/var`; WHIPSHOT code (`HTTP_X_UX`, `HTTP_NSC_CLIENTTYPE` / `LDAP` with
-    `eval`) and the Unit 42 web shell's key, passphrase and token, also inside
-    real packages. Hashes change per victim, so the code markers matter more.
+    `/var`; WHIPSHOT code (`HTTP_X_UX` read by code, `HTTP_NSC_CLIENTTYPE` /
+    `LDAP` with `eval`) and the Unit 42 web shell's key, passphrase and token,
+    also inside real packages. Hashes change per victim, so the code markers
+    matter more. A web shell header name without code that reads it (e.g. in
+    documentation) is `REVIEW`.
     PHP / XHTML files elsewhere under `/var/netscaler` are `REVIEW`.
 
 ## Sharing the output
