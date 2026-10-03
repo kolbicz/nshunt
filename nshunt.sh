@@ -18,7 +18,7 @@ grep -q "$(printf '\r')" "$0" && printf '%s\n' "ERROR: $0 has Windows line endin
 # logs or a check that crashed) or the report could not be saved - never
 # trust "no findings" with exit 2.
 
-VERSION=2.1
+VERSION=2.2
 
 # anonymise <host>: stdin report -> copy that can leave the organisation.
 # Masks the host name, internal IPs and the box's own addresses, public IPs
@@ -97,15 +97,18 @@ anonymise() {
 		if (host != "" && !hn && length(host) > 2 && tolower(host) !~ /^(ns|netscaler|localhost)(\.|$)/) { hs = host; sub(/\..*/, "", hs)
 			HN[++hn] = host; HN[++hn] = toupper(host); HN[++hn] = tolower(host)
 			HN[++hn] = hs; HN[++hn] = toupper(hs); HN[++hn] = tolower(hs) }
-		for (j = 1; j <= hn; j++) l = word(l, HN[j], "HOST")
+		# only in the header and in evidence lines (indented): never in the
+		# titles and texts of nshunt, where a short name like "vpn" is a word
+		if (NR == 1 || l ~ /^[ \t]/) for (j = 1; j <= hn; j++) l = word(l, HN[j], "HOST")
 		# shell history: keep only the command words nshunt looked for
-		if (match(l, /sh_command=".*/)) {
+		if (match(l, /(sh|shell)_command=".*/)) {
 			cmd = substr(l, RSTART, RLENGTH); kw = ""
 			n = split("ldapsearch|openssl s_client|/flash/nsconfig/keys|F1.key|F2.key|database.php|LDAPTLS_REQCERT|cp /usr/bin/bash|del /etc/auth.conf|httpd -k restart|chmod|nsshutdown -R|kill -HUP|cli_script", K, "|")
 			for (j = 1; j <= n; j++) if (index(cmd, K[j])) kw = kw (kw != "" ? ", " : "") K[j]
 			l = substr(l, 1, RSTART - 1) "sh_command: " kw " (rest removed)" substr(l, RSTART + RLENGTH)
 		}
-		l = swap(l, "/var/vpn/bookmark/[^ /]+", 18, 0, "USER", "^pwnpzi")
+		# the whole name below the bookmark folder (subfolders, single spaces)
+		l = swap(l, "/var/vpn/bookmark/([^ ]| [^ (])+", 18, 0, "USER", "^pwnpzi")
 		l = swap(l, "UTC  by [^ ]+ from ", 8, 6, "USER", "")
 		l = swap(l, "system user [^ ]+", 12, 0, "USER", "")
 		l = swap(l, "/var/cron/tabs/[^ :/]+", 15, 0, "USER", "^root$")
@@ -116,6 +119,7 @@ anonymise() {
 		l = swap(l, "/partitions/[^/ ]+/", 12, 1, "PARTITION", "")
 		l = swap(l, "admin partition [^ )]+", 16, 0, "PARTITION", "")
 		l = swap(l, "policylabel [^ ]+", 12, 0, "LABEL", "")
+		l = swap(l, "-policy \"[^\"]+\"", 9, 1, "POLICY", "")
 		l = swap(l, "-policy [^ \"]+", 8, 0, "POLICY", "")
 		l = swap(l, "-policyName [^ \"]+", 12, 0, "POLICY", "")
 		payload = (l ~ /tried:|decoded |INDEX:|"K:/)
@@ -220,17 +224,26 @@ when() { ls -ldT "$1" 2>/dev/null | awk '{ m = (index("JanFebMarAprMayJunJulAugS
 # passwords after -w / -password / -bindpw / password= ..., and user:pass@ in URLs
 redact() {
 	# flags: -w <secret>, also quoted ("a b", 'a b', \"a b\" inside a logged command line)
-	F='((^|[[:space:]"=])-(w|bindpw|bindDnPassword|ldapBindDnPassword|password|passwd|pass|secret|radKey|key))'
+	# (-key / -cert name files, not secrets: not masked)
+	F='((^|[[:space:]"=])--?(w|bindpw|bindDnPassword|ldapBindDnPassword|password|passwd|pass|passcrypt|secret|radKey))'
 	# assignments: password=, passwd=, pwd=, secret=, token= - any case
-	A='(([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Pp][Aa][Ss][Ss][Ww][Dd]|[Pp][Ww][Dd]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn])[[:space:]]*[=:][[:space:]]*)'
+	A='(([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Pp][Aa][Ss][Ss][Ww][Dd]|[Pp][Ww][Dd]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn]|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy])[[:space:]]*[=:][[:space:]]*)'
 	sed -E \
 	-e 's#(://[^/:@[:space:]]+):[^@/[:space:]]+@#\1:****@#g' \
-	-e 's/(([Aa][Dd][Dd]|[Ss][Ee][Tt])[[:space:]]+system[[:space:]]+user[[:space:]]+[^[:space:]]+[[:space:]]+)[^-[:space:]][^[:space:]]*/\1********/g' \
+	-e 's#(://[^/:@[:space:]"]+):[^@/[:space:]"]+$#\1:****#' \
+	-e 's/(([Aa][Dd][Dd]|[Ss][Ee][Tt])[[:space:]]+system[[:space:]]+user[[:space:]]+(\\"[^"]*\\"|"[^"]*"|'"'"'[^'"'"']*'"'"'|[^[:space:]]+)[[:space:]]+)(\\"[^"]*\\"|"[^"]*"|'"'"'[^'"'"']*'"'"'|\\?"[^"]*$|'"'"'[^'"'"']*$|[^-[:space:]][^[:space:]]*)/\1********/g' \
+	-e 's/((^|[[:space:]"=])(-u|-U|--user)([[:space:]]+|=)"?[^[:space:]":@\/]*(:[^[:space:]":@\/]*)?:)[^[:space:]"]+/\1****/g' \
+	-e 's/([Aa]uthorization:[[:space:]]*([Bb]earer|[Bb]asic)[[:space:]]+)[^[:space:]"'"'"']+/\1****/g' \
+	-e '/ldap[a-z]*[[:space:]]/s/([[:space:]]-w)([^[:space:]]+)/\1****/g' \
+	-e '/(sshpass|mysql)[[:space:]]/s/([[:space:]]-p)([[:space:]]*)([^-[:space:]][^[:space:]]*)/\1\2****/g' \
+	-e 's/((^|[[:space:]"=])pass:)[^[:space:]"]+/\1****/g' \
 	-e "s/$F([[:space:]]+)\\\\\"[^\"]*\\\\\"/\\1\\4****/g" \
+	-e "s/$F([[:space:]]+)\\\\?[\"'][^\"']*\$/\\1\\4****/" \
 	-e "s/$F([[:space:]]+)\"[^\"]*\"/\\1\\4****/g" \
 	-e "s/$F([[:space:]]+)'[^']*'/\\1\\4****/g" \
 	-e "s/$F([[:space:]]+)[^[:space:]\"']+/\\1\\4****/g" \
 	-e "s/$A\\\\\"[^\"]*\\\\\"/\\1****/g" \
+	-e "s/$A\\\\?[\"'][^\"']*\$/\\1****/" \
 	-e "s/$A\"[^\"]*\"/\\1****/g" \
 	-e "s/$A'[^']*'/\\1****/g" \
 	-e "s/$A[^&[:space:]\"']+/\\1****/g"; }
@@ -273,6 +286,10 @@ alogs() {
 		[ -f "$f" ] && rd "$f"
 	done
 }
+# notadmin: drop commands an admin ran - shell history lines and CLI commands
+# (CMD_EXECUTED) from an admin PC; commands a script ran on the box itself
+# (Remote_ip 127.0.0.1) stay. An admin blocking an attacker IP is no hit.
+notadmin() { awk '!/(sh|shell)_command=/ && !(/ CMD_EXECUTED / && !/Remote_ip 127\.0\.0\.1 /)'; }
 # logs [name]: every rotation of /var/log/<name> (default ns.log), unzipped
 logs() {
 	for f in "$R/var/log/${1:-ns.log}" "$R/var/log/${1:-ns.log}".*; do
@@ -329,12 +346,16 @@ if [ -n "$BUILD" ]; then
 	fixt=""; fsrc=""
 	if [ -n "$inst" ]; then
 		BINST="$(date -u -r "$inst" '+%Y-%m-%d %H:%M') UTC"
-		if [ -n "$prb" ] && [ "$prb" -ge "$inst" ] && [ $((prb - inst)) -le 86400 ]; then fixt=$prb; fsrc="first boot after the install"
+		# the marker of the first boot after the install, else the last boot
+		# (later than or equal to the first one after the install: safe side)
+		# a box deployed from the image has no upgrade record at all; the
+		# kernel file then carries the image build date, not an install
+		if [ -z "$prb" ] && [ -d "$R/var/nsinstall" ] && [ -z "$(ls -d "$R"/var/nsinstall/installns_state* "$R"/var/nsinstall/*build* "$R"/var/nsinstall/*"$REL-$BMA"* 2>/dev/null)" ]; then
+			FRESH=1; fixt=$inst; fsrc="image date"; FIXGUESS=1
+		elif [ -n "$prb" ] && [ "$prb" -ge "$inst" ]; then fixt=$prb; fsrc="first boot after the install"
 		elif [ -n "$bs" ] && [ "$bs" -ge "$inst" ] && [ $((bs - inst)) -le 86400 ]; then fixt=$bs; fsrc="boot after the install"
+		elif [ -n "$bs" ] && [ "$bs" -ge "$inst" ]; then fixt=$bs; fsrc="last boot - the first boot after the install may have been earlier"
 		else fixt=$inst; fsrc="install time - the reboot after it is not known"; FIXGUESS=1
-			# a box deployed from the image has no upgrade record at all; the
-			# kernel file then carries the image build date, not an install
-			[ -d "$R/var/nsinstall" ] && [ -z "$(ls -d "$R"/var/nsinstall/installns_state* "$R"/var/nsinstall/*build* "$R"/var/nsinstall/*"$REL-$BMA"* 2>/dev/null)" ] && FRESH=1
 		fi
 	else
 		# no kernel file: the install marker or the folder the build was unpacked into
@@ -386,6 +407,7 @@ done
 (
 	touch -t 202001100000 "$T/a"; touch -t 202002010000 "$T/b"
 	: > "$T/f"; : > "$T/f2"
+	TT='\[%[^]]*(template\.new|BLOCK|readpipe|system|INCLUDE|PROCESS|PERL|USE |FOREACH|%\])'
 	if [ -d "$R/var/vpn/bookmark" ]; then
 		# A glob, not find | read: NetScaler names some bookmark files
 		# bm_prefix_<base64 of the user>, and that base64 can end in a line break.
@@ -393,26 +415,31 @@ done
 			[ -f "$f" ] || continue
 			why=""
 			case "${f##*/}" in pwnpzi*) why="exploit file name" ;; esac
-			grep -q '\[%' "$f" 2>>"$E" && why="${why:+$why, }contains template code"
+			# Template Toolkit code as the exploit wrote it ([% template.new(...) %]);
+			# a bare "[%" also occurs in URL-encoded links (?q=[%22...): only REVIEW
+			tt=""; grep -qE "$TT" "$f" 2>>"$E" && why="${why:+$why, }contains template code"
+			[ -z "$why" ] && grep -q '\[%' "$f" 2>>"$E" && tt=1
 			# ls/find only know the modification time, not when a file was created
 			inwave=""; [ -n "$(find "$f" -newer "$T/a" ! -newer "$T/b")" ] && inwave=1
 			if grep -q '^<user username="[^"]*" */>$' "$f" 2>>"$E"; then kind="empty bookmark stub"
 			else kind="contains bookmarks"; fi
 			if [ -n "$why" ]; then
 				printf '%s  %s  (%s)\n' "$(when "$f")" "$(shown "${f#$R}")" "$why" >> "$T/f"
+			elif [ -n "$tt" ]; then
+				printf '%s  %s  (contains "[%%" but no template code - look at it)\n' "$(when "$f")" "$(shown "${f#$R}")" >> "$T/f2"
 			elif [ -n "$inwave" ]; then
 				printf '%s  %s  (%s)\n' "$(when "$f")" "$(shown "${f#$R}")" "$kind" >> "$T/f2"
 			fi
 		done
 		# deeper subfolders: the exploit name or template code only
-		find "$R/var/vpn/bookmark" -mindepth 3 -type f \( -name 'pwnpzi*' -o -exec grep -q '\[%' {} \; \) -print 2>>"$E" |
+		find "$R/var/vpn/bookmark" -mindepth 3 -type f \( -name 'pwnpzi*' -o -exec grep -qE "$TT" {} \; \) -print 2>>"$E" |
 			list | sed 's/$/  (exploit file name or template code, in a subfolder)/' >> "$T/f"
 		sort -o "$T/f" "$T/f"; sort -o "$T/f2" "$T/f2"
 	fi
 	[ -d "$R/netscaler/portal/templates" ] &&
 		find "$R/netscaler/portal/templates" -type f -user nobody 2>>"$E" | list >> "$T/f"
 	finding COMPROMISE "CVE-2019-19781 exploit files: this box was exploited (Jan 2020 wave)" "$T/f"
-	finding REVIEW "Bookmarks last modified during the Jan 2020 exploitation wave - random names and empty stubs point to the exploit, real user names may be legit" "$T/f2"
+	finding REVIEW "Bookmarks to look at: modified during the Jan 2020 exploitation wave (random names and empty stubs point to the exploit, real user names may be legit), or containing \"[%\"" "$T/f2"
 ) || { echo "[SKIPPED] check 1 (CVE-2019-19781 (Shitrix) bookmark / template files) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 2. Shell commands injected through the VPN login (2026 attacks) -------
@@ -444,26 +471,53 @@ done
 		# could have run (ISO dates with seconds compare as strings). An attempt
 		# without a readable date is never counted as "after".
 		inst=""; [ "$FIXED" = yes ] && inst=$FIXSEC
+		# secrets are masked in the whole payload before it is shortened below
+		redact < "$T/att" > "$T/attr"
 		awk -F '\t' -v inst="$inst" -v saml="$SAMLCFG" '
 		!($1 in n) { order[++k] = $1; first[$1] = $2 }
 		{ n[$1]++; if ($2 != "") last[$1] = $2; if (first[$1] == "" && $2 != "") first[$1] = $2
 		  if (!seen[$1 SUBSEP $3]++) p[$1] = p[$1] "\n  tried: " substr($3, 1, 110)
 		  if ($2 == "") nodate[$1] = 1
-		  else if (inst != "" && $2 < inst) before[$1] = 1
-		  else if (inst != "" && saml != "" && $2 >= "2026-10-02") since[$1] = 1 }
+		  else { if (inst != "" && $2 < inst) before[$1] = 1
+			if (saml != "" && $2 >= "2026-10-02") since[$1] = 1 } }
 		END { for (i = 1; i <= k; i++) { ip = order[i]
 			when = (first[ip] != "") ? substr(first[ip], 1, 16) " .. " substr(last[ip], 1, 16) " UTC" : "date unknown"
 			printf "%-16s %d attempt(s)  %s%s%s%s\n", ip, n[ip], when,
-				(before[ip] ? "  <- BEFORE the fixed build was running" : (since[ip] ? "  <- since 2 Oct: the new SAML issue can run commands on fixed builds" : "")),
-				(inst != "" && nodate[ip] ? "  <- date unknown: could be BEFORE the fix" : ""), p[ip] } }' "$T/att" > "$T/f"
+				(before[ip] ? "  <- BEFORE the fixed build was running" : "") (since[ip] ? "  <- since 2 Oct: the new SAML issue can run commands on fixed builds" : ""),
+				(inst != "" && nodate[ip] ? "  <- date unknown: could be BEFORE the fix" : ""), p[ip] } }' "$T/attr" > "$T/f"
 		: > "$T/injections"
 		grep -q 'BEFORE the fixed build' "$T/f" && : > "$T/before-fix"
 		grep -q 'date unknown: could be BEFORE' "$T/f" && : > "$T/undated"
 		grep -q 'the new SAML issue can run' "$T/f" && : > "$T/saml-era"
 
 		# Files the attacker tried to create in web folders: do they exist now?
-		cut -f3 "$T/att" | grep -oE '/(var/netscaler/(logon|gui)|netscaler/ns_gui|var/vpn)/[^] `;$|>"<'"'"'()[]+' |
-			sort -u > "$T/drop"
+		# Only write targets count (after > / >>, tee, -o/-O, tar c..f, the last
+		# argument of cp/mv), after URL-decoding and ${IFS} -> space; paths the
+		# payload only reads or lists are no evidence. One "first attempt" per file.
+		awk -F '\t' '
+			function urldec(s,   o, h, i) { o = ""
+				while (match(s, /%[0-9A-Fa-f][0-9A-Fa-f]/)) { h = toupper(substr(s, RSTART + 1, 2))
+					i = (index("0123456789ABCDEF", substr(h, 1, 1)) - 1) * 16 + index("0123456789ABCDEF", substr(h, 2, 1)) - 1
+					o = o substr(s, 1, RSTART - 1) sprintf("%c", i); s = substr(s, RSTART + 3) }
+				return o s }
+			function out(t) { gsub(/["\047]/, "", t); sub(/[]\[{}]+$/, "", t)
+				if (t ~ /^\/(var\/netscaler\/(logon|gui)|netscaler\/ns_gui|var\/vpn)\//) print t "\t" d }
+			{ d = $2; x = urldec($3); gsub(/\$\{IFS[^}]*\}|\$IFS/, " ", x)
+				gsub(/\$\(|`|;|\|\||&&|\||\(|\)|#/, " ; ", x); gsub(/>>?/, " & ", x); gsub(/> >/, ">>", x)
+				n = split(x, w, /[ \t]+/); cmd = ""; last = ""
+				for (i = 1; i <= n + 1; i++) { t = (i <= n) ? w[i] : ";"
+					if (t == "") continue
+					if (t == ";") { if (cmd ~ /^(cp|mv)$/ && last != "") out(last); cmd = ""; last = ""; continue }
+					if (cmd == "") { cmd = t; sub(/.*\//, "", cmd); prev = t; continue }
+					if (prev == ">" || prev == ">>") out(t)
+					else if (cmd == "tee" && t !~ /^-/) out(t)
+					else if (cmd ~ /^(curl|wget|fetch)$/ && prev ~ /^-[A-Za-z]*[oO]$/ && t != "-") out(t)
+					else if (cmd == "tar" && prev ~ /^-?[a-z]*c[a-z]*f$/) out(t)
+					if (t !~ /^-/ && t != ">" && t != ">>") last = t
+					prev = t } }' "$T/att" |
+			awk -F '\t' '!($1 in m) { m[$1] = $2; next } $2 != "" && (m[$1] == "" || $2 < m[$1]) { m[$1] = $2 }
+				END { for (k in m) print k "\t" m[k] }' | sort > "$T/dropt"
+		cut -f1 "$T/dropt" > "$T/drop"
 		: > "$T/exists"; : > "$T/dl"; : > "$T/dlunk"
 		if [ -s "$T/drop" ]; then
 			# URL each file would be served under (logon -> /logon/..., GUI -> /...)
@@ -473,17 +527,24 @@ done
 			: > "$T/hits"
 			[ -s "$T/dropurl" ] && alogs | grep -F -f "$T/dropurl" > "$T/hits"
 			echo "Files the attacks tried to create:" >> "$T/f"
+			: > "$T/existold"
 			while IFS= read -r p; do
-				if [ -e "$R$p" ]; then
-					echo "  EXISTS: $p" >> "$T/f"; echo "$(when "$R$p")  $p" >> "$T/exists"
+				# first attempt (UTC) that writes this file, and the file time
+				first=$(awk -F '\t' -v p="$p" '$1 == p { print $2; exit }' "$T/dropt")
+				fa=""; [ -n "$first" ] && fa=$(date -j -u -f '%Y-%m-%d %H:%M:%S' "$first" +%s 2>/dev/null)
+				fm=""; [ -f "$R$p" ] && fm=$(epoch "$R$p")
+				new=""; [ -n "$fa" ] && [ -n "$fm" ] && [ "$fm" -ge "$fa" ] && new=1
+				if [ -f "$R$p" ] && [ -n "$new" ]; then
+					echo "  EXISTS: $p  (changed after the attempt)" >> "$T/f"; echo "$(when "$R$p")  $p" >> "$T/exists"
+				elif [ -f "$R$p" ]; then
+					echo "  exists, but not changed since the attempt (or its time is unknown): $p" >> "$T/f"
+					echo "$(when "$R$p")  $p  (not changed since the first attempt${first:+ $first UTC} - may be the original file)" >> "$T/existold"
 				else
 					echo "  not present now (never created, or removed since): $p" >> "$T/f"
 				fi
 				u=$(printf '%s\n' "$p" | sed -n -e 's|^/var/netscaler/logon/|/logon/|p' \
 					-e 's|^/netscaler/ns_gui/|/|p' -e 's|^/var/netscaler/gui/|/|p')
 				[ -n "$u" ] || continue
-				# first attempt (UTC) whose payload names this file
-				first=$(awk -F '\t' -v p="$p" 'index($3, p) && $2 != "" { print $2 }' "$T/att" | sort | head -1)
 				# "GET /url HTTP/1.1" status size - count statuses. A 2xx only
 				# counts if it came after the first attempt: the same name may
 				# have been served long before (an old file, another admin).
@@ -511,7 +572,10 @@ done
 						print "SUM\t    web requests for " u ": " s (old ? " (" old " success(es) BEFORE the first attempt - not from this attack)" : "") }
 						else print "SUM\t    no web requests for " u " in the access logs still on the box" }' "$T/hits" > "$T/req"
 				awk 'sub(/^SUM\t/, "")' "$T/req" >> "$T/f"
-				awk 'sub(/^DL\t/, "")' "$T/req" >> "$T/dl"
+				# served after the attempt: proof only if the file is gone now or was
+				# written by the attack - an untouched existing file is always served
+				if [ -f "$R$p" ] && [ -z "$new" ]; then awk 'sub(/^DL\t/, "")' "$T/req" >> "$T/dlunk"
+				else awk 'sub(/^DL\t/, "")' "$T/req" >> "$T/dl"; fi
 				awk 'sub(/^UNK\t/, "")' "$T/req" >> "$T/dlunk"
 			done < "$T/drop"
 		fi
@@ -544,7 +608,8 @@ done
 		finding ATTEMPT "Shell commands sent in the VPN login name (command injection)" "$T/f"
 		finding COMPROMISE "A file the attackers tried to create EXISTS - the attack may have worked" "$T/exists"
 		finding COMPROMISE "A file the attackers tried to create was served (2xx) AFTER the attempt - the attack probably worked; check size and client" "$T/dl"
-		finding REVIEW "A file the attackers tried to create was served (2xx), but the times could not be compared - check whether it was after the attempt" "$T/dlunk"
+		finding REVIEW "A file the attackers tried to create was served (2xx), but it may be the original file or the times could not be compared - check size and time" "$T/dlunk"
+		finding REVIEW "A file the attackers tried to write exists, but was not changed since the attempt (or its time is unknown)" "$T/existold"
 	fi
 ) || { echo "[SKIPPED] check 2 (Shell commands injected through the VPN login (2026 attacks)) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
@@ -583,16 +648,22 @@ done
 	set -- $(dirs "$WEB")
 	: > "$T/f"
 	if [ $# -gt 0 ]; then
-		find "$@" -type f \( -name '*.php' -o -name '*.php?' -o -name '*.phtml' -o -name '*.pl' \
-			-o -name '*.py' -o -name '*.sh' \) ! -path '*/admin_ui/*' ! -name 'eula_upgrade.pl' 2>>"$E" | list > "$T/f"
-		find "$@" -type f -exec grep -lIE '<\?(php|=)' {} + 2>>"$E" | grep -v -e '/admin_ui/' -e '\.php$' | list >> "$T/f"
+		# Apache and PHP match these case-insensitively (x.PHP, <?PHP)
+		find "$@" -type f \( -iname '*.php' -o -iname '*.php?' -o -iname '*.phtml' -o -iname '*.pl' \
+			-o -iname '*.py' -o -iname '*.sh' \) ! -path '*/admin_ui/*' ! -name 'eula_upgrade.pl' 2>>"$E" | list > "$T/f"
+		find "$@" -type f -exec grep -liIE '<\?(php|=)' {} + 2>>"$E" | grep -v -i -e '/admin_ui/' -e '\.php$' | list >> "$T/f"
 	fi
-	# webshell calls where no PHP or scripts belong (renamed .ctxs.receiver copies)
+	# webshell calls where no PHP or scripts belong (renamed .ctxs.receiver copies):
+	# passthru() fed from request input. NSC_TASS is a stock cookie name - a
+	# file that only mentions it needs a look, nothing more.
+	: > "$T/f2"
 	# shellcheck disable=SC2046
 	set -- $(dirs "/var/netscaler/logon/LogonPoint/custom /var/vpn")
-	[ $# -gt 0 ] && find "$@" -type f -exec grep -lE 'passthru[[:space:]]*\(|NSC_TASS' {} + 2>>"$E" | list >> "$T/f"
+	[ $# -gt 0 ] && find "$@" -type f -exec grep -lE 'passthru[[:space:]]*\([^)]*\$_(GET|POST|REQUEST|COOKIE|SERVER)' {} + 2>>"$E" | list >> "$T/f"
+	[ $# -gt 0 ] && find "$@" -type f -exec grep -l 'NSC_TASS' {} + 2>>"$E" | list | sed 's/$/  (mentions the NSC_TASS cookie - stock name, but used by the .ctxs.receiver web shell)/' > "$T/f2"
 	sort -u -o "$T/f" "$T/f"
 	finding COMPROMISE "Script or PHP code in a web folder (possible web shell)" "$T/f"
+	finding REVIEW "Files in custom theme / VPN folders that read the NSC_TASS cookie" "$T/f2"
 ) || { echo "[SKIPPED] check 4 (Web shells) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 5. Files the web server created outside the bookmark store ------------
@@ -611,12 +682,24 @@ done
 	: > "$T/f"
 	: > "$T/f2"
 	if [ $# -gt 0 ]; then
-		find "$@" -type f -name '.*' ! -path '*/admin_ui/*' ! -name '.ctxs.receiver' ! -name '.slap.receiver' ! -name '.local_journal' 2>>"$E" | list > "$T/f"
+		# hidden files, folders and symlinks (a stock box has none here but the
+		# admin GUI .htaccess); a hidden link into the config folder serves the
+		# config or keys over the web
+		find "$@" -name '.*' ! -name . \( -type f -o -type d -o -type l \) ! -path '*/admin_ui/*' \
+			! -name '.ctxs.receiver' ! -name '.slap.receiver' ! -name '.local_journal' 2>>"$E" | while IFS= read -r f; do
+			if [ -L "$f" ]; then
+				t=$(ls -ld "$f" 2>/dev/null | sed 's/.* -> //')
+				case "$t" in */nsconfig*|*/flash/*|*/etc/*|*/var/log*) printf '%s\n' "$f" >&3 ;; esac
+				printf '%s  %s  (link to %s)\n' "$(when "$f")" "$(shown "${f#$R}")" "$t"
+			elif [ -d "$f" ]; then printf '%s  %s/  (hidden folder)\n' "$(when "$f")" "$(shown "${f#$R}")"
+			else printf '%s  %s\n' "$(when "$f")" "$(shown "${f#$R}")"; fi
+		done 3>"$T/hl" | sort > "$T/f"
 		# published web shell names (GreyNoise; SpiderLabs: LogonPoint/.local_journal;
 		# Poppelgaard checker 1.10: .slap.receiver of the SAML-attack kit)
 		find "$@" \( -name '.ctxs.receiver' -o -name '.slap.receiver' -o -name '.local_journal' \) 2>>"$E" | list > "$T/f2"
 	fi
-	finding COMPROMISE "Known web shell files (.ctxs.receiver, .slap.receiver, .local_journal - 2026 attacks)" "$T/f2"
+	[ -s "$T/hl" ] && list < "$T/hl" | sed 's/$/  (hidden link into the config, logs or system folders)/' >> "$T/f2"
+	finding COMPROMISE "Known web shell files (.ctxs.receiver, .slap.receiver, .local_journal - 2026 attacks) or hidden links into the config" "$T/f2"
 	finding REVIEW "Hidden files in web folders" "$T/f"
 ) || { echo "[SKIPPED] check 6 (Hidden files in web folders) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
@@ -670,8 +753,17 @@ done
 	# a setuid/setgid bit only matters on a file that can be executed
 	[ $# -gt 0 ] && find "$@" -xdev -type f \( -perm -4000 -o -perm -2000 \) \( -perm -0100 -o -perm -0010 -o -perm -0001 \) 2>>"$E" |
 		sed "s|^$R||" | sort -u |
-		grep -v -E '^/(bin|sbin|usr/bin|usr/sbin|usr/libexec|usr/local/bin|usr/local/sbin)/|^/netscaler/(ping6?|traceroute6?)$|^/var/configd_devno$|^/var/nslog/(nslog\.nextfile|newnslog[^/]*)$|^/var/run/.*\.pid$' |
-		while IFS= read -r f; do printf '%s  %s\n' "$(when "$R$f")" "$f"; done > "$T/f"
+		grep -v -E '^/(bin|sbin|usr/bin|usr/sbin|usr/libexec|usr/local/bin|usr/local/sbin)/|^/netscaler/(ping6?|traceroute6?)$|^/var/configd_devno$' |
+		while IFS= read -r f; do
+			# NetScaler data files that carry these bits: only a program there counts
+			case "$f" in /var/nslog/nslog.nextfile|/var/nslog/newnslog*|/var/run/*.pid)
+				case "$f" in /var/nslog/*/*|/var/run/*/*) ;; *)
+					h=$(head -c 4 "$R$f" 2>/dev/null | tr -d '\177')
+					[ "$h" = ELF ] || [ "$(head -c 2 "$R$f" 2>/dev/null)" = '#!' ] || continue ;;
+				esac ;;
+			esac
+			printf '%s  %s\n' "$(when "$R$f")" "$f"
+		done > "$T/f"
 	finding COMPROMISE "Unknown setuid/setgid programs (possible root backdoor)" "$T/f"
 	# The system folders are skipped above because they hold the standard ones.
 	# They are rebuilt from the firmware at every boot: a setuid/setgid program
@@ -682,8 +774,9 @@ done
 	[ -n "$bs" ] && touch -t "$(date -r $((bs + 900)) +%Y%m%d%H%M.%S)" "$T/booted" 2>/dev/null
 	# shellcheck disable=SC2046
 	set -- $(dirs "/bin /sbin /usr/bin /usr/sbin /usr/libexec /usr/local/bin /usr/local/sbin")
-	[ $# -gt 0 ] && find "$@" -maxdepth 2 -type f \( -perm -4000 -o -perm -2000 \) 2>>"$E" | while IFS= read -r f; do
-		if [ -f "$T/booted" ] && [ -n "$(find "$f" -newer "$T/booted" 2>/dev/null)" ]; then
+	# any depth; the change time (ctime) - touch can set the modification time back
+	[ $# -gt 0 ] && find "$@" -type f \( -perm -4000 -o -perm -2000 \) 2>>"$E" | while IFS= read -r f; do
+		if [ -f "$T/booted" ] && [ -n "$(find "$f" -cnewer "$T/booted" 2>/dev/null)" ]; then
 			printf '%s  %s  (changed after the last boot)\n' "$(when "$f")" "${f#$R}" >> "$T/f3"
 		else
 			case "${f##*/}" in
@@ -713,25 +806,53 @@ done
 			for (i = 1; i <= n; i++) { x = seg[i]; if (x !~ /(curl|wget|fetch)/) continue
 				# every argument that names a host (URL or host.tld/...) counts;
 				# only exactly localhost or a 127.x address is the box itself
-				m = split(x, a, /[ \t"\047]+/)
-				for (j = 1; j <= m; j++) { h = a[j]; if (h == "" || h ~ /^-/) continue
-					sub(/^[a-z]+:\/\//, "", h); sub(/^[^@\/]*@/, "", h); sub(/[\/:].*/, "", h)
-					if (h != "localhost" && h !~ /[.]/) continue
-					if (h !~ /^(localhost|127[.][0-9]+[.][0-9]+[.][0-9]+)$/) keep = 1 } }
+				# only the arguments after curl/wget/fetch; skip options, the
+				# values of -o/-O/-H/-u/-d/-A/-e/-T/--output, paths, redirects.
+				# Any other word names a host - also without a dot (c2/x,
+				# a decimal IP); only localhost, 127.x and ::1 are the box itself.
+				m = split(x, a, /[ \t"\047]+/); on = ""; skip = 0
+				for (j = 1; j <= m; j++) { h = a[j]; if (h == "") continue
+					if (on == "") { if (h ~ /(^|\/)(curl|wget|fetch)$/) { on = h; sub(/.*\//, "", on) } continue }
+					if (skip) { skip = 0; continue }
+					# options with a value: curl -o (not -O, it takes none),
+					# wget -O / -o, fetch -o; -H -u -d -A -e -T for all
+					v = (on == "curl") ? "o" : (on == "wget") ? "oO" : "o"
+					if (h ~ /^-([HudAeTU]|-output|-header|-user|-data|-referer|-output-document)$/ ||
+					    (h ~ /^-[a-zA-Z]*[oO]$/ && index(v, substr(h, length(h))))) { skip = 1; continue }
+					if (h ~ /^-/ || h ~ /^\// || h ~ /[<>&]/) continue
+					sub(/^[a-z]+:\/\//, "", h); sub(/^[^@\/]*@/, "", h); sub(/^\[/, "", h); sub(/\].*/, "", h)
+					if (h !~ /^::1$/) sub(/[\/:].*/, "", h)
+					if (h == "") continue
+					if (h !~ /^(localhost|127[.][0-9]+[.][0-9]+[.][0-9]+|::1)$/) keep = 1 } }
 			if (keep) print }' |
 		redact | sed 's|^|/etc/crontab:|' >> "$T/f"
 	finding REVIEW "Crontabs that run user jobs or downloads (attackers use these to come back)" "$T/f"
 	# user cron jobs that delete or empty logs, shell history or web files:
-	# trace wiping (Beazley). Cleaning up temp files is not. NetScaler's own
-	# jobs live in /etc/crontab and are not looked at here.
-	: > "$T/f2"
+	# trace wiping (Beazley). COMPROMISE only for a real wipe: emptying a log
+	# (": >", "cat /dev/null >", truncate, a bare "> log"), rm of the logs
+	# nshunt reads or of shell history, or find -delete / -exec rm on a log
+	# folder without an age or name filter. A job writing its own output to a
+	# log ("cmd > /var/log/x.log") and filtered clean-up only need a look.
+	# NetScaler's own jobs live in /etc/crontab and are not looked at here.
+	: > "$T/f2"; : > "$T/f7"; : > "$T/f8"
 	[ -d "$R/var/cron/tabs" ] && for t in "$R"/var/cron/tabs/*; do
 		[ -f "$t" ] || continue
 		grep -nE -v '^[[:space:]]*(#|$)' "$t" 2>>"$E" |
-			grep -E '(rm[[:space:]]+-|rm[[:space:]]+/|truncate|find[^|;]*-delete|find[^|;]*-exec[[:space:]]+rm|(^|[^0-9>])>[[:space:]]*/var/(log|nslog|core)|cat[[:space:]]+/dev/null[[:space:]]*>)' |
+			grep -E '(rm[[:space:]]+-|rm[[:space:]]+/|truncate|find[^|;]*-delete|find[^|;]*-exec[[:space:]]+rm|>[[:space:]]*/var/(log|nslog|core)|cat[[:space:]]+/dev/null[[:space:]]*>)' |
 			grep -E '/var/log|/var/nslog|/var/core|history|/var/netscaler/logon|/netscaler/ns_gui|/var/vpn' |
-			redact | cut -c1-200 | sed "s|^|${t#$R}:|"
-	done >> "$T/f2"
+			awk -v t="${t#$R}" '
+			{ line = $0; c = $0; sub(/^[0-9]+:/, "", c); sub(/^[[:space:]]*@[a-z]+[[:space:]]+/, "", c)
+				if (c !~ /^[[:space:]]*@/) sub(/^[[:space:]]*([^[:space:]]+[[:space:]]+){5}/, "", c)
+				lv = 1; n = split(c, seg, /;|&&|\|\||\|/)
+				for (i = 1; i <= n; i++) { x = seg[i]; sub(/^[[:space:]]+/, "", x)
+					L = "/var/log/(ns[.]log|httpaccess|httperror|messages|sh[.]log|bash[.]log|cli[.]log|auth[.]log|notice[.]log)|/var/nslog|history"
+					if (x ~ /^(:|true|cat[[:space:]]+\/dev\/null|echo[[:space:]]+-n[[:space:]]*("")?)?[[:space:]]*>[[:space:]]*\/var\/(log|nslog)/ || x ~ /^truncate[[:space:]]/) lv = 2
+					else if (x ~ /^rm[[:space:]]/ && x ~ L) lv = 2
+					else if (x ~ /^find[[:space:]]/ && x ~ /-delete|-exec[[:space:]]+rm/ && x ~ /\/var\/(log|nslog)|history/ && x !~ /-(m|a|c)(time|min)|-newer|-name|-iname|-size/) lv = 2 }
+				print lv "\t" t ":" line }' | redact | cut -c1-200
+	done > "$T/f8"
+	awk 'sub(/^2\t/, "")' "$T/f8" > "$T/f2"; awk 'sub(/^1\t/, "")' "$T/f8" > "$T/f7"
+	finding REVIEW "User cron jobs that write to or clean up logs, history or web files - check that they are yours" "$T/f7"
 	finding COMPROMISE "User cron jobs that delete or empty logs and files (wiping traces)" "$T/f2"
 ) || { echo "[SKIPPED] check 9 (User crontabs) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
@@ -740,24 +861,42 @@ done
 	# shellcheck disable=SC2046
 	set -- $(dirs "/tmp /var/tmp /var/nstmp")
 	: > "$T/f"; : > "$T/f3"
+	: > "$T/tmpf"
+	# cilog <file>: a CodeIgniter log - line 1 is exactly the guard block
+	# "<?php defined('BASEPATH') OR exit('...'); ?>" and no PHP block follows
+	cilog() { head -1 "$1" 2>/dev/null | grep -qE "^<\?php[[:space:]]+defined\([\"'](BASEPATH|SYSPATH)[\"']\)[[:space:]]+(OR|or|\|\|)[[:space:]]+(exit|die)\([^()]*\);?[[:space:]]*\?>[[:space:]]*\$" &&
+		! tail -n +2 "$1" 2>/dev/null | grep -q '<?'; }
+	# Every file is checked for loader / web shell code first; the allowlists
+	# below only shorten the REVIEW list (an attacker can use those names too).
 	[ $# -gt 0 ] && find "$@" -type f \( -perm -0100 -o -name '*.so' -o -name '*.php' -o -name '*.pl' -o -name '*.py' \) 2>>"$E" |
-		sed "s|^$R||" |
-		grep -v -E '^/var/tmp/(Fortville_Silicom_Intel|Mellanox|par-[^/]*)/|^/var/tmp/sum$|^/var/tmp/ns_system_backup\.pl$|^/tmp/nshunt\.' |
+		sed "s|^$R||" > "$T/tmpf"
+	while IFS= read -r f; do
+		# The admin GUI (CodeIgniter) logs to log-YYYY-MM-DD.php files that start
+		# with a "no direct access" guard - a log, not a program, even when it
+		# recorded an attack payload - but only a guard line followed by plain log
+		# lines: a second "<?" block after it is code, not a log entry
+		case "${f##*/}" in log-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].php) cilog "$R$f" && continue ;; esac
+		# Code run from a decoded payload or from web request input: a web
+		# shell or loader. A bare eval()/exec() call alone proves neither.
+		if grep -qE '(eval|exec|assert|system|shell_exec|passthru|popen)[[:space:]]*\([^)]*(base64_decode|b64decode|\$_(GET|POST|REQUEST|COOKIE|SERVER))|(base64_decode|b64decode)[[:space:]]*\([^)]*\$_(GET|POST|REQUEST|COOKIE|SERVER)' "$R$f" 2>/dev/null; then
+			printf '%s  %s\n' "$(when "$R$f")" "$f" >> "$T/f3"
+		fi
+	done < "$T/tmpf"
+	grep -v -E '^/var/tmp/(Fortville_Silicom_Intel|Mellanox|par-[^/]*)/|^/var/tmp/sum$|^/var/tmp/ns_system_backup\.pl$|^/tmp/nshunt\.' "$T/tmpf" |
 		# IoC scanners you copied there: this script, Citrix's ioc-script, the
 		# ctx697096 checker
 		grep -v -E '^/(var/)?tmp/(.*/)?(nshunt[^/]*|ioc[-_]script[^/]*|ctx697096_check[^/]*)\.sh$|^/(var/)?tmp/(.*/)?ioc[-_]scanner[^/]*\.(tgz|tar\.gz)$' |
 		# NetScaler Console Security Advisory scan scripts
 		grep -v -E '^/var/tmp/(CVE-[0-9]{4}-[0-9]+-detection|[a-z_]+_vulnerability_dete[t]?ction)\.py$' |
 		while IFS= read -r f; do
-			# Code run from a decoded payload or from web request input: a web
-			# shell or loader. A bare eval()/exec() call alone proves neither.
-			if grep -qE '(eval|exec|assert|system|shell_exec|passthru|popen)[[:space:]]*\([^)]*(base64_decode|b64decode|\$_(GET|POST|REQUEST|COOKIE|SERVER))|(base64_decode|b64decode)[[:space:]]*\([^)]*\$_(GET|POST|REQUEST|COOKIE|SERVER)' "$R$f" 2>/dev/null; then
-				printf '%s  %s\n' "$(when "$R$f")" "$f" >> "$T/f3"; continue
-			fi
-			# The admin GUI (CodeIgniter) logs to log-YYYY-MM-DD.php files that
-			# start with a "no direct access" guard - a log, not a program.
+			# already reported as COMPROMISE
+			[ -f "$T/f3" ] && awk -v f="$f" '{ sub(/^[^ ]+ [^ ]+  /, "") } $0 == f { x = 1 } END { exit !x }' "$T/f3" && continue
 			case "${f##*/}" in log-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].php)
-				head -1 "$R$f" 2>/dev/null | grep -q "defined('BASEPATH')\|defined(\"BASEPATH\")\|defined('SYSPATH')" && continue ;;
+				if cilog "$R$f"; then
+					grep -qE 'base64_decode|b64decode|\$_(GET|POST|REQUEST|COOKIE)' "$R$f" 2>/dev/null &&
+						printf '%s  %s  (admin GUI log that recorded web shell / payload text)\n' "$(when "$R$f")" "$f"
+					continue
+				fi ;;
 			esac
 			if grep -qE 'eval[[:space:]]*\(|shell_exec[[:space:]]*\(|passthru[[:space:]]*\(|base64_decode[[:space:]]*\(|b64decode[[:space:]]*\(' "$R$f" 2>/dev/null; then
 				printf '%s  %s  (runs dynamic code - look at it)\n' "$(when "$R$f")" "$f"
@@ -766,11 +905,13 @@ done
 			fi
 		done | sort |
 		# many files with the same name pattern (dates, numbers): one line each
-		awk '{ k = $3; gsub(/[0-9]/, "#", k); if (!(k in n)) { first[k] = $1 " " $2; order[++m] = k }
+		awk 'NF > 3 { note[++nn] = $0; next }
+			{ k = $3; gsub(/[0-9]/, "#", k); if (!(k in n)) { first[k] = $1 " " $2; order[++m] = k }
 			line[k, ++n[k]] = $0; last[k] = $1 " " $2 }
 			END { for (i = 1; i <= m; i++) { k = order[i]
 				if (n[k] > 3) printf "%s .. %s  %s  (%d files)\n", first[k], last[k], k, n[k]
-				else for (j = 1; j <= n[k]; j++) print line[k, j] } }' > "$T/f"
+				else for (j = 1; j <= n[k]; j++) print line[k, j] }
+				for (i = 1; i <= nn; i++) print note[i] }' > "$T/f"
 	finding REVIEW "Programs in temp folders" "$T/f"
 	[ -f "$T/f3" ] && sort -o "$T/f3" "$T/f3"
 	finding COMPROMISE "Scripts in temp folders that run decoded payloads or web request input (loader / web shell)" "$T/f3"
@@ -786,8 +927,11 @@ done
 		[ "$c" = /nsconfig/httpd.conf ] && [ -f "$R/flash/nsconfig/httpd.conf" ] && continue
 		printf '%s\n' "$c" >> "$T/confs"
 	done
-	# follow Include / IncludeOptional (absolute paths, globs) through included
-	# files too; a file already in the list is not read again (loops stop)
+	# follow Include / IncludeOptional through included files too: absolute or
+	# relative to ServerRoot (stock "/etc"), globs, and directories (all files
+	# in them); a file already in the list is not read again (loops stop)
+	sroot=$(sed -n -E 's/^[[:space:]]*ServerRoot[[:space:]]+"?([^"[:space:]]+)"?.*/\1/p' "$R/etc/httpd.conf" 2>/dev/null | head -1)
+	[ -n "$sroot" ] || sroot=/etc
 	: > "$T/read"
 	while :; do
 		: > "$T/inc"
@@ -796,7 +940,11 @@ done
 			printf '%s\n' "$c" >> "$T/read"
 			sed -n -E 's/^[[:space:]]*[Ii]nclude([Oo]ptional)?[[:space:]]+"?([^"[:space:]]+)"?.*/\2/p' "$R$c" 2>>"$E" |
 				while IFS= read -r inc; do
-					case "$inc" in /*) for x in "$R"$inc; do [ -f "$x" ] && printf '%s\n' "${x#$R}"; done ;; esac
+					case "$inc" in /*) ;; *) inc="$sroot/$inc" ;; esac
+					for x in "$R"$inc; do
+						if [ -d "$x" ]; then for y in "$x"/*; do [ -f "$y" ] && printf '%s\n' "${y#$R}"; done
+						elif [ -f "$x" ]; then printf '%s\n' "${x#$R}"; fi
+					done
 				done >> "$T/inc"
 		done < "$T/confs"
 		n0=$(wc -l < "$T/confs"); cat "$T/inc" >> "$T/confs"
@@ -820,13 +968,13 @@ done
 			l ~ /^[ \t]*<\/(files|filesmatch|location|locationmatch|directory|directorymatch)>/ {
 				if (dep > 0) dep--; sect = (dep > 0) ? stk[dep] : ""; head = (dep > 0) ? hst[dep] : "" }
 			# PHP handler for anything but .php/.phtml (e.g. .deb, .sig)
-			l ~ /^[ \t]*add(handler|type)[ \t]+"?application\/x-httpd-php"?([ \t]|$)/ {
+			l ~ /^[ \t]*add(handler|type)[ \t]+"?(application\/x-httpd-php[0-9]?|php[0-9]?-script)"?([ \t]|$)/ {
 				for (i = 3; i <= NF; i++) { e = tolower($i); gsub(/"/, "", e)
 					if (e !~ /^\.?(php[0-9]?|phtml)$/) { print "HIGH\t" f ":" NR ": " $0 "  (runs non-PHP files as PHP)"; break } }
 			}
 			# Safe only inside <Files>/<FilesMatch> that names nothing but PHP
 			# extensions: "\.(php|deb)$" still leaves "deb" after removing them.
-			l ~ /^[ \t]*(sethandler|forcetype)[ \t]+"?application\/x-httpd-php/ &&
+			l ~ /^[ \t]*(sethandler|forcetype)[ \t]+"?(application\/x-httpd-php|php[0-9]?-script)/ &&
 			    !(sect ~ /^[ \t]*<files(match)?[ \t]/ && phponly(sect)) {
 				print "HIGH\t" f ":" NR ": " $0 (sect != "" ? "  [in " head "]" : "") "  (runs non-PHP files as PHP)" }
 			# Alias onto a hidden/.sig/.deb file, or a static URL (.ico, .css, ...)
@@ -845,13 +993,16 @@ done
 				rw = (l ~ /^[ \t]*rewriterule/)
 				base = tgt; sub(/.*\//, "", base)
 				if (tgt ~ /\$[0-9]/) { suf = tgt; sub(/.*\$[0-9]+/, "", suf) } else suf = tgt
-				if (base ~ /^\./ || suf ~ /\.(sig|deb)$/ ||
+				# a hidden target only when it is not the same name as the source
+				# (Alias /.well-known /var/vpn/.well-known maps like to like)
+				sb = src; sub(/\/$/, "", sb); sub(/.*\//, "", sb)
+				if ((base ~ /^\./ && base != sb && !(base ~ /^\.well-known$/)) || suf ~ /\.(sig|deb)$/ ||
 				    (!rw && src ~ /\.(ico|css|png|gif|js)/ && suf != "" && suf !~ /\.(ico|css|png|gif|js)$/ && (tgt !~ /\$[0-9]/ || suf ~ /^\./)))
 					print "HIGH\t" f ":" NR ": " $0 "  (serves a disguised file)"
 			}
 			# Stock NetScaler ships "php_flag engine off" globally; the attackers
 			# flip it to "on" (Unit 42). Inside a section it only needs a look.
-			l ~ /^[ \t]*php_flag[ \t]+engine[ \t]+on/ {
+			l ~ /^[ \t]*php(_admin)?_(flag|value)[ \t]+engine[ \t]+(on|1|true)/ {
 				if (sect == "") print "HIGH\t" f ":" NR ": " $0 "  (PHP switched on for the whole web server - stock config has it off)"
 				else print "CHECK\t" f ":" NR ": " $0 "  [in " head "]" }
 			l ~ /#[ \t]*(require all denied|php_flag engine off)/ { print "CHECK\t" f ":" NR ": " $0 "  (protection commented out)" }
@@ -881,25 +1032,22 @@ done
 	done >> "$T/f"
 	finding REVIEW "Startup scripts run loaders, downloads or permission changes at boot" "$T/f"
 	# /var/python/bin/customsnmpd is a NetScaler file the attackers modified for
-	# persistence (SpiderLabs): download or shell code in it is COMPROMISE, a
-	# change since the campaign (August 2026) needs a look
+	# persistence (SpiderLabs). Stock it is a 7-line Python entry-point wrapper
+	# (import sys / from csnmp.main import main / sys.exit(main())). Download,
+	# loader or shell code in it (comments ignored) is COMPROMISE; any other line
+	# that is not part of the wrapper is REVIEW - by content, not by date, which
+	# can be set back.
 	: > "$T/f3"; : > "$T/f4"; c=/var/python/bin/customsnmpd
 	if [ -f "$R$c" ]; then
-		if grep -qE 'curl[[:space:]]|wget[[:space:]]|fetch[[:space:]]|/dev/tcp/|nc[[:space:]]+-e|https?://[0-9]|/tmp/\.|/var/tmp/\.' "$R$c" 2>>"$E"; then
-			printf '%s  %s  (contains download or shell code)\n' "$(when "$R$c")" "$c" > "$T/f3"
-		else
-			touch -t 202608010000 "$T/campaign"
-			# the install of the running build rewrites it (seen within half an
-			# hour on a fresh box): a change within a day after the install is normal
-			m=$(epoch "$R$c")
-			if [ -n "${INSTSEC:-}" ] && [ -n "$m" ] && [ "$m" -ge "$INSTSEC" ] && [ $((m - INSTSEC)) -le 86400 ]; then :
-			elif [ -n "$(find "$R$c" -newer "$T/campaign" 2>/dev/null)" ]; then
-				printf '%s  %s  (changed since August 2026, not during the install - compare with a clean box on the same build)\n' "$(when "$R$c")" "$c" > "$T/f4"
-			fi
+		grep -vE '^[[:space:]]*(#|$)' "$R$c" 2>>"$E" > "$T/snmp"
+		if grep -qE 'curl[[:space:]]|wget[[:space:]]|fetch[[:space:]]+-|/dev/tcp/|nc[[:space:]]+-e|https?://[0-9]|/tmp/\.|/var/tmp/\.|(exec|eval)[[:space:]]*\([^)]*(b64decode|decompress|marshal|base64)|urlopen[[:space:]]*\(|urllib|socket\.socket|\.connect[[:space:]]*\(\(|pty\.spawn|subprocess|os\.(system|popen|exec)' "$T/snmp"; then
+			printf '%s  %s  (contains download, loader or shell code)\n' "$(when "$R$c")" "$c" > "$T/f3"
+		elif grep -vqE '^(#!.*python[0-9.]*|import (sys|re)|from csnmp\.main import main|if __name__ == .__main__.:|[[:space:]]+if sys\.argv\[0\]\.endswith\(.\.exe.\):|[[:space:]]+sys\.argv\[0\] = (sys\.argv\[0\]\[:-4\]|re\.sub\(.*sys\.argv\[0\]\))|[[:space:]]+sys\.exit\(main\(\)\))[[:space:]]*$' "$T/snmp"; then
+			printf '%s  %s  (not the stock wrapper - compare with a clean box on the same build)\n' "$(when "$R$c")" "$c" > "$T/f4"
 		fi
 	fi
 	finding COMPROMISE "customsnmpd modified to run attacker code (persistence)" "$T/f3"
-	finding REVIEW "customsnmpd changed recently - attackers modified it for persistence" "$T/f4"
+	finding REVIEW "customsnmpd differs from the stock wrapper - attackers modified it for persistence" "$T/f4"
 	# nsafter.sh runs after every boot (Beazley): writes into the web folders or
 	# httpd.conf, setuid chmods and decoders there are persistence
 	: > "$T/f2"
@@ -913,20 +1061,28 @@ done
 		awk -v W='(/var/netscaler/logon|/netscaler/ns_gui|/var/vpn|/var/netscaler/gui|httpd[.]conf)' \
 			-v O='chmod[[:space:]]+[ug]?[+]?s([[:space:]]|$)|chmod[[:space:]]+0?[4-7][0-7][0-7][0-7][[:space:]]|python[0-9.]*[[:space:]]+-c|b64decode|base64[[:space:]]+-d|(^|[^a-z])nc[[:space:]]+-' '
 		/^[[:space:]]*#/ { next }
-		{ hit = (tolower($0) ~ O); n = split($0, seg, /;|&&|\|/)
+		# strong: setuid, decoders, nc, or a .php/.sig/.deb/hidden file written into
+		# a web folder; weak: other copies into web folders or httpd.conf (the
+		# Citrix-documented way to keep customisations across reboots)
+		function lvl(t,   b) { if (t !~ W) return 0; b = t; sub(/.*\//, "", b)
+			return (b ~ /^\./ || tolower(b) ~ /\.(php[0-9]?|phtml|sig|deb)$/) ? 2 : 1 }
+		function up(v) { if (v > hit) hit = v }
+		{ hit = (tolower($0) ~ O) ? 2 : 0; n = split($0, seg, /;|&&|\|/)
 			for (i = 1; i <= n; i++) { s = seg[i]; k = split(s, w, /[ \t]+/); m = 0
 				for (j = 1; j <= k; j++) if (w[j] != "") a[++m] = w[j]
 				if (!m) continue
 				cmd = a[1]; sub(/.*\//, "", cmd)
-				if (cmd ~ /^(cp|mv|ln|install)$/) { for (j = m; j > 1; j--) if (a[j] !~ /^-/) { if (a[j] ~ W) hit = 1; break } }
-				if (cmd == "tee") for (j = 2; j <= m; j++) if (a[j] !~ /^-/ && a[j] ~ W) hit = 1
-				if ((cmd == "sed" || cmd == "perl") && s ~ /[ \t]-[a-z]*i/) for (j = 2; j <= m; j++) if (a[j] ~ W) hit = 1
-				if (match(s, />>?[ \t]*[^ \t]+/)) { t = substr(s, RSTART, RLENGTH); sub(/^>>?[ \t]*/, "", t); gsub(/["\047]/, "", t); if (t ~ W) hit = 1 }
+				if (cmd ~ /^(cp|mv|ln|install)$/) { for (j = m; j > 1; j--) if (a[j] !~ /^-/) { up(lvl(a[j])); break } }
+				if (cmd == "tee") for (j = 2; j <= m; j++) if (a[j] !~ /^-/) up(lvl(a[j]))
+				if ((cmd == "sed" || cmd == "perl") && s ~ /[ \t]-[a-z]*i/) for (j = 2; j <= m; j++) up(lvl(a[j]))
+				if (match(s, />>?[ \t]*[^ \t]+/)) { t = substr(s, RSTART, RLENGTH); sub(/^>>?[ \t]*/, "", t); gsub(/["\047]/, "", t); up(lvl(t)) }
 			}
-			if (hit) print FNR ":" $0 }' "$R$c" 2>>"$E" | redact | cut -c1-200 | sed "s|^|$c:|"
+			if (hit) print hit "\t" FNR ":" $0 }' "$R$c" 2>>"$E" | redact | cut -c1-200 | sed "s|^\([12]\)	|\1	$c:|"
 		break
 	done > "$T/f2"
-	finding COMPROMISE "nsafter.sh (runs after every boot) writes into web folders or httpd.conf, sets setuid or decodes payloads" "$T/f2"
+	awk 'sub(/^1\t/, "")' "$T/f2" > "$T/f5"; awk 'sub(/^2\t/, "")' "$T/f2" > "$T/f6"
+	finding COMPROMISE "nsafter.sh (runs after every boot) sets setuid, decodes payloads or writes scripts / hidden files into web folders" "$T/f6"
+	finding REVIEW "nsafter.sh copies files into web folders or httpd.conf at every boot (the documented way to keep customisations - check what it copies)" "$T/f5"
 ) || { echo "[SKIPPED] check 12 (Startup scripts) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 13. Fake .deb packages in web folders (WHIPSHOT disguise) -------------
@@ -934,10 +1090,13 @@ done
 	# shellcheck disable=SC2046
 	set -- $(dirs "$WEB")
 	: > "$T/f"
+	: > "$T/debbad"
 	[ $# -gt 0 ] && find "$@" -type f -name '*.deb' 2>>"$E" | while IFS= read -r f; do
-		# every real .deb is an ar archive and starts with "!<arch>"
-		[ "$(head -c 7 "$f" 2>>"$E")" = '!<arch>' ] || printf '%s\n' "$f"
-	done | list > "$T/f"
+		# every real .deb is an ar archive and starts with "!<arch>"; text in its
+		# place is a disguised file, an empty or binary one is a damaged package
+		[ "$(head -c 7 "$f" 2>>"$E")" = '!<arch>' ] && continue
+		if [ -s "$f" ] && grep -qI . "$f" 2>/dev/null; then printf '%s\n' "$f"; else printf '%s\n' "$f" >&3; fi
+	done 3>"$T/debbad" | list > "$T/f"
 	# Client-package and media folders hold compiled packages and images only
 	# (Gotham, Mandiant): a script or PHP code there is a disguised web shell.
 	: > "$T/f2"; : > "$T/pkgscript"
@@ -964,15 +1123,17 @@ done
 	sort -u -o "$T/f" "$T/f"
 	finding COMPROMISE "Disguised files in web folders (fake .deb packages, scripts among client packages)" "$T/f"
 	finding REVIEW "Unexpected files among the client packages - packages and images are normal, anything else is not" "$T/f2"
+	list < "$T/debbad" | sed 's/$/  (empty or damaged package - not an ar archive, no text)/' > "$T/f3"
+	finding REVIEW "Damaged .deb packages in web folders (empty or not a package) - restore them; compare with a clean box" "$T/f3"
 ) || { echo "[SKIPPED] check 13 (Fake .deb packages) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 14. Shells / interpreters with setuid or setgid -----------------------
 (
 	# Check 8 skips the system folders; a setuid /bin/sh hides there.
 	# shellcheck disable=SC2046
-	set -- $(dirs "/bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin /netscaler")
+	set -- $(dirs "/bin /sbin /usr/bin /usr/sbin /usr/libexec /usr/local/bin /usr/local/sbin /netscaler")
 	: > "$T/f"
-	[ $# -gt 0 ] && find "$@" -maxdepth 1 -type f \( -perm -4000 -o -perm -2000 \) \
+	[ $# -gt 0 ] && find "$@" -type f \( -perm -4000 -o -perm -2000 \) \
 		\( -name sh -o -name bash -o -name dash -o -name csh -o -name tcsh -o -name ksh -o -name zsh \
 		-o -name 'python*' -o -name 'perl*' -o -name 'php*' -o -name nc -o -name busybox \) 2>>"$E" | list > "$T/f"
 	finding COMPROMISE "Shell or interpreter with setuid/setgid bit (anyone running it gets root)" "$T/f"
@@ -1009,18 +1170,27 @@ done
 				# Python with flock; shell scripts (IoC scanners like this one) are skipped
 				case "${f##*/}" in nshunt*|results-nshunt*) continue ;; esac
 				head -1 "$f" | grep -q '^#!.*/\(ba\)\{0,1\}sh' && continue
-				grep -q 'fcntl' "$f" && printf '%s  %s  (SLAPSHOT code)\n' "$(when "$f")" "${f#$R}"
+				# rule sets and IoC lists name these strings too: code only
+				case "${f##*/}" in *.yar|*.yara|*.json|*.ioc|*.txt|*.csv|*.md) continue ;; esac
+				grep -qE '^[[:space:]]*rule[[:space:]]+[A-Za-z0-9_]+' "$f" && continue
+				grep -q 'fcntl\.flock[[:space:]]*(' "$f" && grep -qE 'os\.environ|getenv' "$f" &&
+					printf '%s  %s  (SLAPSHOT code)\n' "$(when "$f")" "${f#$R}"
 			done
 	done >> "$T/f"
 	# nsmon.pl Perl implant (Arctic Wolf): hidden folder, files, cron entry
-	for p in /var/tmp/.nsmon /var/tmp/.nsmon/.cfg /var/tmp/.nsmon/.state /var/tmp/.nsmon/nsmon.pl /var/tmp/.s; do
+	for p in /var/tmp/.nsmon /var/tmp/.nsmon/.cfg /var/tmp/.nsmon/.state /var/tmp/.nsmon/nsmon.pl; do
 		if [ -e "$R$p" ]; then printf '%s  %s  (nsmon implant)\n' "$(when "$R$p")" "$p"; fi
 	done >> "$T/f"
+	# /var/tmp/.s (its socket) is too generic a name on its own: REVIEW
+	: > "$T/fs"
+	[ -e "$R/var/tmp/.s" ] && printf '%s  %s  (name the nsmon implant uses for its socket)\n' "$(when "$R/var/tmp/.s")" /var/tmp/.s > "$T/fs"
 	for c in /etc/crontab /nsconfig/crontab /flash/nsconfig/crontab "$R"/var/cron/tabs/*; do
 		case "$c" in "$R"/*) f=$c ;; *) f=$R$c ;; esac
-		[ -f "$f" ] && grep -n 'nsmon' "$f" 2>/dev/null | redact | cut -c1-160 | sed "s|^|${f#$R}:|; s|\$|  (nsmon cron job)|"
+		[ -f "$f" ] && grep -nvE '^[[:space:]]*#' "$f" 2>/dev/null | grep -E '(^|[/[:space:]])\.?nsmon(\.pl)?([[:space:]]|$)' |
+			redact | cut -c1-160 | sed "s|^|${f#$R}:|; s|\$|  (nsmon cron job)|"
 	done >> "$T/f"
 	finding COMPROMISE "SLAPSHOT tunnel, nsmon implant or known payload process" "$T/f"
+	finding REVIEW "Possible nsmon implant socket (/var/tmp/.s) - check what it is" "$T/fs"
 	# Platypus remote-access agent (TENEX): the binary hides as /netscaler.local/
 	# ns_*.pl (a folder stock NetScaler does not have), its working folder is
 	# /var/core/.ns-cache. Names, or the word "platypus" alone, are only REVIEW.
@@ -1096,10 +1266,12 @@ done
 	# nsginstaller64.deb is the real Linux client installer - normal downloads;
 	# /vpn/media/nsgclient.ico does not exist on a stock box (GTIG: a .sig web
 	# shell behind it)
-	alogs | awk '/\/vpns?\/media\/nsgclient\.ico/ || /\/[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]+\.(ico|sig)/ ||
-		/\/(nsgser18|nsgsupport|nsgpackage64|nsgbuild)\.deb/ ||
-		(/\/nsginstaller[0-9]*\.deb/ && !/\/nsginstaller64\.deb/) ||
-		/\/vpns?\/scripts\/linux\/[^ "?]*\.php/ || /"POST \/vpns?\/(media|scripts|theme)\//' > "$T/acc"
+	# the requested path only - not the Referer or the query string
+	alogs | awk 'match($0, /"[A-Z]+ [^ "]+/) { r = substr($0, RSTART + 1, RLENGTH - 1); p = r; sub(/^[A-Z]+ /, "", p); sub(/\?.*/, "", p)
+		if (p ~ /\/vpns?\/media\/nsgclient\.ico$/ || p ~ /\/[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]+\.(ico|sig)$/ ||
+		    p ~ /\/(nsgser18|nsgsupport|nsgpackage64|nsgbuild)\.deb$/ ||
+		    (p ~ /\/nsginstaller[0-9]*\.deb$/ && p !~ /\/nsginstaller64\.deb$/) ||
+		    p ~ /\/vpns?\/scripts\/linux\/[^ "?]*\.php$/ || r ~ /^POST \/vpns?\/(media|scripts|theme)\//) print }' > "$T/acc"
 	cap "$T/acc" > "$T/f"
 	[ -s "$T/f" ] && echo "(WHIPSHOT answers 404 - a 404 with a large response size means the shell ran)" >> "$T/f"
 	finding ATTEMPT "Requests for web shell URLs (<hex>.ico / .sig, nsgclient.ico, known web shell .deb names, POSTs to static paths) in the web access logs" "$T/f"
@@ -1112,9 +1284,12 @@ done
 
 	# base64 PHP ("PD9" = "<?") inside a User-Agent: a web shell staged
 	# through the access log, e.g. on GET /vpn/media/*.ico (eSentire)
-	alogs | grep -E '"[^"]*[^A-Za-z0-9+/:]PD9[A-Za-z0-9+/]{16,}={0,2}[^"]*"' | grep -v 'INDEX:' > "$T/pd9"
+	# Only in the User-Agent field, and only the PHP openings "<?php", "<?=",
+	# "<? " - base64 XML ("PD94bWwg" = "<?xml") in a SAML RelayState is normal.
+	alogs | awk 'match($0, /" [0-9]+ [0-9-]+ "[^"]*" "[^"]*"/) { u = substr($0, RSTART, RLENGTH); sub(/.*" "/, "", u)
+		if (u ~ /(^|[^A-Za-z0-9+\/:])(PD9waH|PD89|PD8g|PD8J)[A-Za-z0-9+\/]{12,}/ && u !~ /INDEX:/) print }' > "$T/pd9"
 	cap "$T/pd9" > "$T/f"
-	grep -oE '[^A-Za-z0-9+/:]PD9[A-Za-z0-9+/]{16,}={0,2}' "$T/pd9" | cut -c2- | decode >> "$T/f"
+	grep -oE '(^|[^A-Za-z0-9+/:])(PD9waH|PD89|PD8g|PD8J)[A-Za-z0-9+/]{12,}={0,2}' "$T/pd9" | sed 's/^[^P]//' | decode >> "$T/f"
 	finding ATTEMPT "Base64 PHP code in the User-Agent (web shell staged through the access log)" "$T/f"
 ) || { echo "[SKIPPED] check 16 (Web access log) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
@@ -1128,7 +1303,9 @@ done
 	# nsaaad failures and Pitboss reboots. AAA crashes alone do not prove exploitation.
 	# Only lines from the last 14 days, sorted by time across all rotations.
 	# ns.log lines carry a GMT date; syslog-only lines (messages) have no year.
-	{ logs; logs messages; } | grep -v 'shell_command=' |
+	# messages lines carry no year: only rotations changed in the last 15 days
+	{ logs; for f in "$R/var/log/messages" "$R/var/log/messages".*; do
+		[ -f "$f" ] && [ -n "$(find "$f" -mtime -15 2>/dev/null)" ] && rd "$f"; done; } | grep -v 'shell_command=' |
 		grep -E 'ClientVersion DTLSv1\.0.*Handshake failure-Internal Error|exit with orphan rings|NOT restarting NSPPE|\(NSPPE-[0-9]+\),( jid [0-9]+,)? uid [0-9]+: exited on signal|nsaaad.*(unexpectedly died|EXITED with status 0x([1-9a-f]|0[0-9a-f]*[1-9a-f])|SIGNALED|maximum number of restarts|restarts \([0-9]+\))|Pitboss declaring system failure:.*nsaaad|All monitored processes have exited, rebooting' |
 		awk -v now="$NOW" "$AWKTIME"'
 		BEGIN { Y = substr(now, 1, 4) + 0
@@ -1154,7 +1331,7 @@ done
 				return v }
 			match($0, /proc [A-Za-z0-9_]+ \([0-9]+\) EXITED with status 0x[0-9a-fA-F]+/) {
 				w = substr($0, RSTART, RLENGTH); split(w, a, " "); p = a[2]
-				st = hx(substr(a[7], 3)); sg = (st >= 128) ? "signal " (st - 128) : "exit " st
+				st = hx(substr(a[7], 3)); sg = (st % 128) ? "signal " (st % 128) : "exit " int(st / 256)
 				if (!(p in n)) o[++k] = p; n[p]++; if (index(" " S[p] ",", " " sg ",") == 0) S[p] = S[p] (S[p] != "" ? ", " : "") sg }
 			match($0, /New pid \([0-9]+\) for \([A-Za-z0-9_]+\) restarts \([0-9]+\)/) {
 				w = substr($0, RSTART, RLENGTH); q = w; sub(/.* for \(/, "", q); sub(/\).*/, "", q)
@@ -1203,22 +1380,23 @@ done
 	IPS="$IPS|139\\.162\\.83\\.159|139\\.162\\.75\\.170|207\\.148\\.105\\.57|64\\.176\\.71\\.42|194\\.127\\.166\\.126|91\\.199\\.163\\.55|103\\.214\\.20\\.54|109\\.136\\.126\\.142|79\\.133\\.42\\.141|146\\.70\\.199\\.53|135\\.136\\.98\\.176|170\\.64\\.143\\.206|165\\.227\\.228\\.21"
 	IPS="$IPS|139\\.59\\.86\\.242|159\\.223\\.233\\.184|64\\.227\\.181\\.23|85\\.11\\.187\\.35|66\\.173\\.222\\.26|185\\.231\\.33\\.46|5\\.83\\.144\\.60|167\\.88\\.172\\.6|143\\.244\\.44\\.177|31\\.56\\.197\\.137|23\\.234\\.83\\.194|23\\.234\\.109\\.28|23\\.234\\.80\\.246"
 	# Cloudflare WARP exits the actor used - shared with ordinary WARP users
+	IPSN=$IPS
 	IPS="$IPS|104\\.28\\.215\\.13[67]|104\\.28\\.247\\.13[67]"
-	{ logs; logs messages; alogs; } | grep -v 'shell_command=' | grep -oE "(^|[^0-9.])($IPS)([^0-9]|\$)" |
+	{ logs; logs messages; alogs; } | notadmin | grep -oE "(^|[^0-9.])($IPS)([^0-9]|\$)" |
 		grep -oE "$IPS" | sort | uniq -c |
 		awk '{ printf "%-16s %d log line(s)%s\n", $2, $1, ($2 ~ /^104\.28\./ ? "  (Cloudflare WARP - also used by ordinary WARP users)" : "") }' > "$T/f"
 	# attacker domains (IFIN, Arctic Wolf)
-	{ logs; logs messages; alogs; } | grep -v 'shell_command=' |
+	{ logs; logs messages; alogs; } | notadmin |
 		# IFIN, Arctic Wolf, TENEX (white-guard.pro resolves to the main C2 server);
 		# pylrk.cc serves the payload of the SAML attack on fixed builds (Oct 2026),
 		# also read as pyrlnk.cc (Beaumont); gs.thc.org / gsocket.io: gsocket relays
-		grep -oE '(^|[^A-Za-z0-9-])([A-Za-z0-9-]+\.)*(echvista\.com|entretiensol\.com|white-guard\.pro|pylrk\.cc|pyrlnk\.cc|gs\.thc\.org|gsocket\.io)([^A-Za-z0-9.-]|$)' |
-		grep -oE 'echvista\.com|entretiensol\.com|white-guard\.pro|pylrk\.cc|pyrlnk\.cc|gs\.thc\.org|gsocket\.io' |
+		grep -oiE '(^|[^A-Za-z0-9-])([A-Za-z0-9-]+\.)*(echvista\.com|entretiensol\.com|white-guard\.pro|pylrk\.cc|pyrlnk\.cc|gs\.thc\.org|gsocket\.io)\.?([^A-Za-z0-9.-]|$)' |
+		grep -oiE 'echvista\.com|entretiensol\.com|white-guard\.pro|pylrk\.cc|pyrlnk\.cc|gs\.thc\.org|gsocket\.io' | tr 'A-Z' 'a-z' |
 		sort | uniq -c | awk '{ printf "%-16s %d log line(s)  (attacker domain)\n", $2, $1 }' >> "$T/f"
 	finding ATTEMPT "Known attacker IP addresses in the logs" "$T/f"
 	# Domains only listed in the attackers' TLS certificate (TENEX: operator-
 	# associated with moderate confidence, control not proven): a lead, no more
-	{ logs; logs messages; alogs; } | grep -v 'shell_command=' |
+	{ logs; logs messages; alogs; } | notadmin |
 		grep -oE '(^|[^A-Za-z0-9-])([A-Za-z0-9-]+\.)*(garyvard\.com|hickoryusedauto\.com|gurerasfalt\.com|rockinroyaltykids\.com|currydownsrvpark\.com)([^A-Za-z0-9.-]|$)' |
 		grep -oE 'garyvard\.com|hickoryusedauto\.com|gurerasfalt\.com|rockinroyaltykids\.com|currydownsrvpark\.com' |
 		sort | uniq -c | awk '{ printf "%-24s %d log line(s)\n", $2, $1 }' > "$T/f4"
@@ -1228,14 +1406,20 @@ done
 	# PitScaler.com), and residential-proxy probe senders Gotham saw (via the
 	# Poppelgaard checker 1.11): a hunting lead only.
 	OPP='172\.247\.44\.85|165\.227\.201\.112|173\.231\.39\.244|64\.225\.103\.14|159\.65\.104\.231|142\.93\.205\.229|182\.101\.54\.57|87\.224\.84\.82|137\.220\.53\.135|120\.28\.233\.211|149\.28\.58\.71|23\.234\.111\.22|198\.13\.159\.233|85\.221\.203\.85|46\.150\.68\.55|159\.26\.103\.184|45\.249\.89\.172|197\.52\.9\.138|180\.242\.113\.168|85\.117\.117\.248|73\.43\.85\.7|88\.180\.103\.22|194\.28\.195\.90|95\.63\.246\.50|31\.13\.192\.160|185\.170\.55\.89|104\.203\.50\.26|37\.19\.221\.171|45\.143\.167\.96|206\.232\.71\.215|130\.94\.106\.141|58\.187\.56\.89|171\.106\.10\.118|82\.24\.212\.15|178\.66\.43\.241|185\.209\.15\.246|94\.190\.77\.195|93\.177\.60\.233|68\.46\.140\.222|178\.218\.40\.232|49\.36\.107\.103|191\.37\.30\.194|23\.234\.74\.48|72\.73\.231\.73|95\.229\.84\.239|113\.137\.102\.68|47\.243\.125\.255|47\.76\.92\.109|8\.217\.173\.25|8\.210\.67\.91|47\.239\.205\.29|47\.76\.132\.65|8\.218\.219\.56|47\.76\.102\.1|47\.76\.63\.52|8\.210\.119\.74|64\.177\.93\.71|44\.252\.255\.141|194\.242\.130\.193|125\.122\.56\.47|23\.132\.164\.35|54\.70\.59\.128|44\.226\.128\.41|4\.246\.63\.96|176\.65\.148\.54|199\.233\.217\.13|130\.94\.20\.222|13\.59\.243\.24|100\.40\.202\.26|114\.181\.20\.159|114\.37\.217\.107|142\.129\.220\.168|153\.66\.69\.45|173\.77\.155\.230|184\.12\.39\.60|199\.79\.241\.36|202\.60\.177\.157|204\.210\.216\.23|209\.79\.172\.70|209\.99\.184\.231|210\.252\.36\.116|24\.126\.15\.56|27\.98\.42\.70|45\.36\.42\.217|47\.227\.98\.207|66\.188\.65\.11|67\.224\.124\.236|68\.99\.0\.48|71\.163\.14\.19|71\.163\.176\.214|73\.22\.64\.16|74\.244\.147\.208|74\.99\.67\.70|76\.36\.174\.5|76\.72\.187\.172|96\.248\.121\.105|97\.205\.234\.34|98\.29\.80\.205|99\.110\.24\.72'
-	{ logs; alogs; } | grep -v 'shell_command=' | grep -oE "(^|[^0-9.])($OPP)([^0-9]|\$)" |
+	{ logs; alogs; } | notadmin | grep -oE "(^|[^0-9.])($OPP)([^0-9]|\$)" |
 		grep -oE "$OPP" | sort | uniq -c | sort -rn | awk '{ printf "%-16s %d log line(s)\n", $2, $1 }' > "$T/f3"
 	finding ATTEMPT "Opportunistic scanners and unattributed attack waves (GreyNoise, TENEX) - hunting lead only, often residential or proxy addresses: do not block on this alone" "$T/f3"
-	: > "$T/f2"
+	# Live connections (not the shared WARP addresses): from the box out to a
+	# listed IP is COMPROMISE; to a service port of the box (an attack or scan
+	# going on) is ATTEMPT
+	: > "$T/f2"; : > "$T/f5"
 	if [ -z "$R" ] && command -v netstat >/dev/null 2>&1; then
-		netstat -an 2>>"$E" | grep -E "(^|[^0-9.])($IPS)[.:][0-9]+([^0-9]|\$)" > "$T/f2"
+		netstat -an 2>>"$E" | grep -E "(^|[^0-9.])($IPSN)[.:][0-9]+([^0-9]|\$)" |
+			awk '{ lp = $4; sub(/.*[.:]/, "", lp); print ((lp + 0 < 1024) ? "IN" : "OUT") "\t" $0 }' > "$T/ns"
+		awk 'sub(/^OUT\t/, "")' "$T/ns" > "$T/f2"; awk 'sub(/^IN\t/, "")' "$T/ns" > "$T/f5"
 	fi
-	finding COMPROMISE "Open network connection to a known attacker IP right now" "$T/f2"
+	finding COMPROMISE "Open network connection from the NetScaler to a known attacker IP right now" "$T/f2"
+	finding ATTEMPT "Connection from a known attacker IP to a service of the NetScaler right now" "$T/f5"
 ) || { echo "[SKIPPED] check 18 (Known attacker IP addresses) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 19. Files written by the published exploit payloads -------------------
@@ -1244,28 +1428,25 @@ done
 	# shellcheck disable=SC2046
 	set -- $(dirs "$WEB")
 	{
-		# fixed names (watchTowr PoC, Gotham, Deyda)
-		for p in /.x /s /tmp/s /var/tmp/s /lula /tmp/lula /var/tmp/lula /var/1.py /var/tmp/sh \
-			/var/netscaler/logon/insight-new.js /netscaler/ns_gui/admin_ui/e.txt /netscaler/ns_gui/admin_ui/log.txt \
+		# fixed names in web folders (Gotham, Deyda); short generic names (/s,
+		# /tmp/sh, lula, ...) are REVIEW below - check 23 hashes those files
+		for p in /var/netscaler/logon/insight-new.js /netscaler/ns_gui/admin_ui/e.txt /netscaler/ns_gui/admin_ui/log.txt \
 			/var/netscaler/gui/admin_ui/e.txt /var/netscaler/gui/admin_ui/log.txt; do
 			if [ -e "$R$p" ] || [ -L "$R$p" ]; then printf '%s\n' "$R$p"; fi
 		done
 		for d in / /tmp /var/tmp; do [ -d "$R$d" ] && find "$R$d" -maxdepth 1 \( -name 'update_c*.pl' -o -name 'update_result_*.tgz' \) 2>>"$E"; done
 		# marker files of exploit tools; the public watchTowr DTLS tool writes /tmp/watchTowr
-		for d in /tmp /var/tmp; do [ -d "$R$d" ] && find "$R$d" -maxdepth 1 \( -name 'wtw*' -o -name 'watchTowr*' -o -name 'boom*' \) 2>>"$E"; done
+		for d in /tmp /var/tmp; do [ -d "$R$d" ] && find "$R$d" -maxdepth 1 \( -name 'wtw888*' -o -name 'watchTowr*' \) 2>>"$E"; done
 		[ -d "$R/var/netscaler/logon/themes" ] && find "$R/var/netscaler/logon/themes" -maxdepth 1 -name 'wt88771*' 2>>"$E"
 		# the SAML attack (2 Oct): payload saved as /v and run (Beaumont, via
 		# PitScaler); its kit (Poppelgaard checker 1.10): Perl agent in
 		# /nsconfig/.slap/, python helpers in /var/tmp/.ux/, logs and staging files,
-		# httpd.conf backup, and start lines in rc.netscaler / nsafter.sh / crontab
-		for p in /v /tmp/v /var/tmp/v /flash/nsconfig/.slap /var/tmp/.ux /etc/httpd.conf.slap.bak /flash/nsconfig/httpd.conf.slap.bak; do
+		# httpd.conf backup (start lines in startup scripts: REVIEW below)
+		for p in /flash/nsconfig/.slap /var/tmp/.ux /etc/httpd.conf.slap.bak /flash/nsconfig/httpd.conf.slap.bak; do
 			if [ -e "$R$p" ] || [ -L "$R$p" ]; then printf '%s\n' "$R$p"; fi
 		done
 		for d in /tmp /var/tmp; do [ -d "$R$d" ] && find "$R$d" -maxdepth 1 \( -name '.slap*' -o -name '.s2loot*' \) 2>>"$E"; done
 		for d in /flash/nsconfig /var/tmp /tmp; do [ -d "$R$d" ] && find "$R$d" -maxdepth 3 -type f \( -name 'slapshot.py' -o -name 'whipd.py' \) 2>>"$E"; done
-		for f in /flash/nsconfig/rc.netscaler /flash/nsconfig/nsafter.sh /flash/nsconfig/nsbefore.sh "$R"/var/cron/tabs/* /etc/crontab; do
-			f=${f#$R}; [ -f "$R$f" ] && grep -qE '\.slap/|slapshot|whipd' "$R$f" 2>/dev/null && printf '%s\n' "$R$f"
-		done
 		[ $# -gt 0 ] && find "$@" -type f \( -name 'nx_verify.html' -o -name 'nx_proof.html' -o -name 'Nx_[0-9]*.html' -o -name 'c88771*' -o -name 'xua.html' \) 2>>"$E"
 		# proof files of the "Nx-zD" payload (other names, same marker text)
 		for d in /var/vpn/bookmark /netscaler/ns_gui/vpn /var/netscaler/gui/vpn /var/netscaler/logon/LogonPoint /netscaler/ns_gui/cgi; do
@@ -1313,6 +1494,30 @@ done
 	finding COMPROMISE "Files written by the published exploit payloads (do not open them on the box - they may hold config data)" "$T/f"
 	finding REVIEW "Client packages named like known web shells" "$T/f5"
 	finding REVIEW "Output of the id command in temp folders - a test, a diagnostic or an injected command" "$T/f6"
+	# short names the published payloads used (watchTowr PoC: /s, /.x, boom*,
+	# wtw*; Gotham: lula, /var/1.py, /var/tmp/sh) - also ordinary names
+	: > "$T/f9"
+	{ for p in /.x /s /tmp/s /var/tmp/s /lula /tmp/lula /var/tmp/lula /var/1.py /var/tmp/sh; do
+		if [ -e "$R$p" ] || [ -L "$R$p" ]; then printf '%s\n' "$R$p"; fi
+	  done
+	  for d in /tmp /var/tmp; do [ -d "$R$d" ] && find "$R$d" -maxdepth 1 \( -name 'wtw*' -o -name 'boom*' \) ! -name 'wtw888*' 2>>"$E"; done
+	} | list | sed 's/$/  (a name published exploit payloads used - check what it is)/' > "$T/f9"
+	finding REVIEW "Files with short names that published exploit payloads used (also ordinary names)" "$T/f9"
+	# /v is where the SAML attack saves its payload, but the name (or a keyword
+	# in it) proves nothing: REVIEW. A known payload hash is COMPROMISE in check 23.
+	: > "$T/f7"
+	for p in /v /tmp/v /var/tmp/v; do [ -f "$R$p" ] && printf '%s\n' "$R$p"; done |
+		list | sed 's/$/  (the name the SAML attack saves its payload under - check what it is)/' > "$T/f7"
+	finding REVIEW "A file named /v (the SAML attack saves its payload as /v)" "$T/f7"
+	# Startup scripts and crontabs that mention the SAML-attack kit: a mention
+	# (echo, pgrep, a check) is not a launch - REVIEW with the line; the kit
+	# files themselves are COMPROMISE above
+	: > "$T/f8"
+	for f in /flash/nsconfig/rc.netscaler /flash/nsconfig/nsafter.sh /flash/nsconfig/nsbefore.sh "$R"/var/cron/tabs/* /etc/crontab; do
+		f=${f#$R}; [ -f "$R$f" ] || continue
+		grep -nvE '^[[:space:]]*#' "$R$f" 2>/dev/null | grep -E '\.slap/|slapshot|whipd' | cut -c1-160 | sed "s|^|$f:|"
+	done | redact > "$T/f8"
+	finding REVIEW "Startup scripts or crontabs that mention the SAML-attack kit (.slap, slapshot, whipd) - check whether they start it" "$T/f8"
 ) || { echo "[SKIPPED] check 19 (Exploit payload files) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 20. Exploit, scanner and probe strings in the web logs ----------------
@@ -1328,7 +1533,8 @@ done
 	# say "client IP"; 127.0.0.x is the NetScaler itself forwarding the request.
 	sum() { awk -v l="$1" -v noip="$2" '
 		{ n++; ip = $1
-		  if (ip !~ /^[0-9a-fA-F.:]+$/) { ip = ""; if (match($0, /client [0-9a-fA-F.:]+/)) { ip = substr($0, RSTART + 7, RLENGTH - 7); sub(/:[0-9]+$/, "", ip) } }
+		  # an address has a dot or two colons ("Dec" is all hex digits too)
+		  if (ip !~ /^[0-9a-fA-F.:]+$/ || (ip !~ /\./ && ip !~ /:.*:/)) { ip = ""; if (match($0, /client [0-9a-fA-F.:]+/)) { ip = substr($0, RSTART + 7, RLENGTH - 7); sub(/:[0-9]+$/, "", ip) } }
 		  if (ip ~ /^127\./) { lo++; ip = "" }
 		  if (ip != "" && !(ip in s)) { s[ip]; if (++k <= 5) ips = ips (k > 1 ? ", " : "") ip }
 		  if (match($0, /" [0-9][0-9][0-9] /)) { st = substr($0, RSTART + 2, 3); if (!(st in c)) so[++m] = st; c[st]++ } }
@@ -1358,7 +1564,7 @@ done
 		# Unit 42 web shell login token
 		pl='xd7h/|nsmon|update_c08937|update_result_|/dev/tcp/|nc[[:space:]]+-e[[:space:]]|base64[[:space:]]+-w0|exec-ok|HTTP_X_UX|HTTP_NSC_(LDAP|CLIENTTYPE)|e826d7ddf3c85920'
 		{ alogs; errlogs; } | grep -E "$pl" | sum "payload strings / web shell header names"
-		{ logs; logs messages; } | grep -v 'shell_command=' | grep -E "$pl" | sum "payload strings in ns.log / messages" noip
+		{ logs; logs messages; } | notadmin | grep -E "$pl" | sum "payload strings in ns.log / messages" noip
 		# attack payloads in requests to the login pages (Deyda) - still visible
 		# after ns.log has rotated; normal logins are not matched
 		{ alogs; errlogs; } | grep -iE '(/nf/auth/doAuthentication\.do|/cgi/login|/p/u/doLogon\.do|/logon/LogonPoint/tmindex\.html|/logon/LogonPoint/Authentication/GetUserName)[^[:cntrl:]]*(pitboss|NSPPE|PPE unexpectedly died|missed too many heartbeats|%3B|%60|\$\{IFS\}|curl[[:space:]]|wget[[:space:]]|fetch[[:space:]])' |
@@ -1382,7 +1588,7 @@ done
 	# The exploit canary served = the injected command ran (the file never
 	# exists on a clean box). xua.html / c88771.json are timed against the
 	# attempt in check 2 instead.
-	alogs | grep -E '"[A-Z]+ [^ "]*/(nx_verify|nx_proof|Nx_[0-9]+)\.html[ ?][^"]*" 2[0-9][0-9] ' | cut -c1-200 > "$T/can"
+	alogs | grep -E '"[A-Z]+ /[^ "?]*/(nx_verify|nx_proof|Nx_[0-9]+)\.html[ ?][^"]*" 2[0-9][0-9] ' | cut -c1-200 > "$T/can"
 	head -10 "$T/can" > "$T/f3"
 	n=$(wc -l < "$T/can" | tr -d ' '); [ "$n" -gt 10 ] && echo "... $((n - 10)) more" >> "$T/f3"
 	finding COMPROMISE "An exploit proof file (nx_verify.html, nx_proof.html, Nx_<n>.html) was served (2xx) - an injected command ran on this box" "$T/f3"
@@ -1395,15 +1601,27 @@ done
 	# The NetScaler logs every shell command. The patterns use [x] brackets so
 	# this script's own logged commands never match them; searches run with
 	# grep/awk (by you or other scanners) are skipped too.
-	for f in "$R"/var/log/sh.log "$R"/var/log/sh.log.* "$R"/var/log/bash.log "$R"/var/log/bash.log.*; do
-		[ -f "$f" ] && rd "$f"
-	done |
-		grep -E 'l[d]apsearch|o[p]enssl[[:space:]]+s_client|/flash/nsconfig/k[e]ys|F[12][.]k[e]y|d[a]tabase[.]php|L[D]APTLS_REQCERT|c[p][[:space:]]+/usr/bin/bash|d[e]l[[:space:]]+/etc/auth[.]conf|h[t]tpd[[:space:]]+-k[[:space:]]+restart|c[h]mod[[:space:]]+[ug]?[+]s|n[s]shutdown[[:space:]]+-R|c[h]mod[[:space:]]+0?[4-7][0-7]{3}[[:space:]]+/bin/|k[i]ll[[:space:]]+-HUP[^"]*httpd' |
-		grep -vE 'sh_command="[[:space:]]*(z?[ef]?grep|awk|sed|find|ls)[[:space:]]' | redact | cut -c1-200 > "$T/h"
+	# oldest rotation first (sh.log.9.gz ... sh.log.0.gz, sh.log), so the newest
+	# lines come last and are the ones shown
+	for b in sh bash; do
+		ls "$R/var/log/$b.log".* 2>/dev/null | awk '{ n = $0; sub(/.*\.log\./, "", n); sub(/\..*/, "", n); print n + 0 "\t" $0 }' |
+			sort -rn | cut -f2-
+		echo "$R/var/log/$b.log"
+	done | while IFS= read -r f; do [ -f "$f" ] && rd "$f"; done |
+		grep -E 'l[d]apsearch|o[p]enssl[[:space:]]+s_client|/flash/nsconfig/k[e]ys|F[12][.]k[e]y|d[a]tabase[.]php|L[D]APTLS_REQCERT|c[p][[:space:]]+/usr/bin/bash|d[e]l[[:space:]]+/etc/auth[.]conf|h[t]tpd[[:space:]]+-k[[:space:]]+restart|c[h]mod[[:space:]]+[ug]?[+]s|n[s]shutdown[[:space:]]+-R|c[h]mod[[:space:]]+(-[A-Za-z]+[[:space:]]+)*([ugoa]*[+=][rwxXt]*s|0?[2-7][0-7]{3}[[:space:]])|k[i]ll[[:space:]]+-HUP[^"]*httpd' |
+		# a search alone (grep/awk/sed with nothing chained) is someone looking
+		# (a "|" inside the search pattern is fine; ; && ` $( -exec or a pipe into
+		# a shell or interpreter chain a real command)
+		awk '{ c = $0; if (match(c, /(sh|shell)_command="/)) c = substr(c, RSTART + RLENGTH)
+			if (c ~ /^[[:space:]]*(z?[ef]?grep|awk|sed)[[:space:]]/ &&
+			    c !~ /;|&&|`|\$\(|-exec|\|[[:space:]]*(sh|bash|perl|python[0-9.]*|php)([[:space:]]|"|$)/) next
+			print }' | redact | cut -c1-200 > "$T/h"
 	# the NetScaler CLI "reboot" runs "nsshutdown -R -D ..." - normal, but check the time
 	sed 's/\(nsshutdown -R -D .*\)$/\1  (a reboot from the CLI looks like this - match it with your change records)/' "$T/h" > "$T/h2" && mv "$T/h2" "$T/h"
 	n=$(wc -l < "$T/h" | tr -d ' ')
-	{ [ "$n" -gt 10 ] && echo "... $((n - 10)) older line(s) not shown"; tail -10 "$T/h"; } > "$T/f"
+	# reboots first, so other commands are not pushed out of the last 10
+	{ grep 'a reboot from the CLI' "$T/h"; grep -v 'a reboot from the CLI' "$T/h"; } > "$T/h2" && mv "$T/h2" "$T/h"
+	{ [ "$n" -gt 10 ] && echo "... $((n - 10)) more line(s) not shown"; tail -10 "$T/h"; } > "$T/f"
 	finding REVIEW "Shell commands that read credentials or keys, restart the web server, set setuid or force a reboot - check who ran them" "$T/f"
 ) || { echo "[SKIPPED] check 21 (Shell history) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
@@ -1422,31 +1640,33 @@ done
 			# results-nshunt*, nshunt*; .shrun.cache is NetScaler's own "show running" cache
 			case "${f##*/}" in results-nshunt*|nshunt*|.shrun.cache) continue ;; esac
 			grep -qE '^#NS[0-9]+\.[0-9]+ Build|^(add|set) (ns ip|ns config|system user|ns hostName) ' "$f" 2>/dev/null || continue
+			# c1.txt / c2.txt are the payload's names, but also names admins use
+			# to compare configs: one trace only (see below)
 			case "${f##*/}" in
 			c1.txt|c2.txt) printf '%s  %s  (running config dump - name used by the payload)\n' "$(when "$f")" "${f#$R}" ;;
 			*) printf '%s  %s  (running config dump)\n' "$(when "$f")" "${f#$R}" >> "$T/f2" ;;
 			esac
 		done >> "$T/f"
 	done
+	dsig=0; [ -s "$T/f" ] && dsig=1
 	if [ -s "$T/f" ] && [ -f "$R/var/tmp/labels.txt" ]; then
 		printf '%s  %s  (policy label dump - written by the same payload)\n' "$(when "$R/var/tmp/labels.txt")" /var/tmp/labels.txt >> "$T/f"
+		dsig=2
 	fi
-	finding COMPROMISE "Config dumps written by the admin-account payload (c1.txt / c2.txt) - the config was read and changed" "$T/f"
-	finding REVIEW "Running config copies in temp folders (they contain password hashes and secrets - delete when done)" "$T/f2"
 
 	# Commands the NetScaler logged (ns.log CMD_EXECUTED): who added or bound
 	# a system user, switched EPA failures to NO_AUTH or unbound EPA policies.
 	logs | grep 'CMD_EXECUTED' |
-		grep -E 'Command "(add system user|bind system user|set authentication epaAction[^"]*NO_AUTH|unbind (authentication vserver|authentication policylabel|vpn vserver) [^"]*-polic)' |
+		grep -E 'Command "(add system user|bind system user|set authentication epaAction([^"\\]|\\.)*NO_AUTH|unbind (authentication vserver|authentication policylabel|vpn vserver) ([^"\\]|\\.)*-polic)' |
 		awk '{ u = ""; if (match($0, /User [^ ]+/)) u = substr($0, RSTART + 5, RLENGTH - 5)
 			ip = ""; if (match($0, /Remote_ip [0-9a-fA-F.:]+/)) ip = substr($0, RSTART + 10, RLENGTH - 10)
 			d = ""; if (match($0, /[0-9][0-9]\/[0-9][0-9]\/[0-9][0-9][0-9][0-9]:[0-9][0-9]:[0-9][0-9]/)) {
 				s = substr($0, RSTART, RLENGTH); d = substr(s, 7, 4) "-" substr(s, 1, 2) "-" substr(s, 4, 2) " " substr(s, 12, 5) " UTC" }
-			c = ""; if (match($0, /Command "[^"]*"/)) c = substr($0, RSTART + 9, RLENGTH - 10)
-			# "add/set system user <name> <password> ..." - the password is positional
-			if (c ~ /^(add|set) system user [^ ]+ [^-]/) { n = split(c, w, " "); w[5] = "********"; c = w[1]; for (i = 2; i <= n; i++) c = c " " w[i] }
+			# the command, with \" (quoted names) kept whole; the positional
+			# password of "add/set system user" is masked by redact below
+			c = ""; if (match($0, /Command "([^"\\]|\\.)*"/)) { c = substr($0, RSTART + 9, RLENGTH - 10); gsub(/\\"/, "\"", c) }
 			printf "%s  by %s from %s%s: %s\n", d, (u != "" ? u : "?"), (ip != "" ? ip : "?"),
-				(ip ~ /^127\./ ? " (the box itself - a script)" : ""), substr(c, 1, 120) }' | redact > "$T/cmd"
+				(ip ~ /^127\./ ? " (the box itself - a script)" : ""), c }' | redact | cut -c1-220 > "$T/cmd"
 	# The source decides: GUI, SSH and NITRO commands carry the admin PC's IP,
 	# while a script on the box (cli_script.sh / nscli, like the payload) logs
 	# 127.0.0.1. A script adding admins or letting EPA failures through is the
@@ -1454,10 +1674,16 @@ done
 	# Admins also run cli_script.sh on the shell, so one such command alone is
 	# REVIEW. COMPROMISE needs two of the payload's traces together: a script
 	# adding/binding an admin, a script switching EPA to NO_AUTH, the c1/c2 dumps.
-	sig=0
+	sig=$dsig
 	grep -qE '\(the box itself - a script\): (add|bind) system user' "$T/cmd" && sig=$((sig + 1))
 	grep -qE '\(the box itself - a script\): .*NO_AUTH' "$T/cmd" && sig=$((sig + 1))
-	[ -s "$T/f" ] && sig=$((sig + 1))
+	# the c1/c2 dumps: COMPROMISE together with another trace, else REVIEW
+	if [ "$sig" -ge 2 ]; then
+		finding COMPROMISE "Config dumps written by the admin-account payload (c1.txt / c2.txt) - the config was read and changed" "$T/f"
+	else
+		cat "$T/f" >> "$T/f2"
+	fi
+	finding REVIEW "Running config copies in temp folders (they contain password hashes and secrets - delete when done)" "$T/f2"
 	if [ "$sig" -ge 2 ]; then
 		grep -E '\(the box itself - a script\): ((add|bind) system user|.*NO_AUTH)' "$T/cmd" > "$T/cmdhi"
 		grep -v -E '\(the box itself - a script\): ((add|bind) system user|.*NO_AUTH)' "$T/cmd" > "$T/cmdlo"
@@ -1488,14 +1714,25 @@ done
 			old=$(find $(cat "$T/copies") ! -newer "$T/campaign" 2>/dev/null | xargs ls -t 2>/dev/null | head -1)
 			[ -z "$old" ] && old=$(xargs ls -t < "$T/copies" 2>/dev/null | tail -1)
 		fi
-		if [ -n "$old" ]; then
-			grep -E '^add system user ' "$R$c" | awk '{ print $4 }' | sort -u > "$T/unow"
-			grep -E '^add system user ' "$old" | awk '{ print $4 }' | sort -u > "$T/uold"
-			awk -v o="$T/uold" 'FILENAME == o { old[$0]; next } !($0 in old)' "$T/uold" "$T/unow" | while IFS= read -r u; do
-				adm=$(grep -E "^bind system user $u (superuser|sysAdmin)" "$R$c" | awk '{ print $5 }' | head -1)
-				echo "system user $u${adm:+ (bound to $adm)} - added after ${old#$R} ($(when "$old"))"
-			done >> "$T/f4"
-		fi
+		# users (quoted names whole) and their admin bindings, per config file
+		users() { awk '/^(add|bind) system user / { s = $0; sub(/^[a-z]+ system user +/, "", s); q = substr(s, 1, 1)
+				if ((q == "\"" || q == "\047") && (e = index(substr(s, 2), q))) { u = substr(s, 1, e + 1); r = substr(s, e + 2) }
+				else { u = s; sub(/ .*/, "", u); r = substr(s, length(u) + 1) }
+				if ($1 == "add") print "U\t" u; else { split(r, w, " "); if (tolower(w[1]) ~ /^(superuser|sysadmin)$/) print "A\t" u "\t" w[1] } }' "$1" 2>/dev/null | sort -u; }
+		users "$R$c" > "$T/unow"
+		# Compare with the baseline copy; it should be from before the campaign.
+		# If it is newer (or missing), the attacker's account may already be in
+		# it: then every admin account is listed as well.
+		: > "$T/uold"; of=""
+		[ -n "$old" ] && users "$old" > "$T/uold" && of="${old#$R} ($(when "$old"))"
+		pre=""; [ -n "$old" ] && [ -z "$(find "$old" -newer "$T/campaign" 2>/dev/null)" ] && pre=1
+		awk -F '\t' -v o="$T/uold" -v of="$of" -v pre="$pre" 'FILENAME == o { old[$0]; if ($1 == "U") ou[$2]; next }
+			$1 == "A" { adm[$2] = $3; ao[++a] = $2 }
+			of != "" && !($0 in old) { if ($1 == "U") nu[++k] = $2; else if ($2 in ou) pr[++m] = $2 "\t" $3 }
+			END { for (i = 1; i <= k; i++) { print "system user " nu[i] (nu[i] in adm ? " (bound to " adm[nu[i]] ")" : "") " - added after " of; done[nu[i]] }
+				for (i = 1; i <= m; i++) { split(pr[i], x, "\t"); print "system user " x[1] " - bound to " x[2] " after " of; done[x[1]] }
+				if (!pre) for (i = 1; i <= a; i++) if (!(ao[i] in done)) { done[ao[i]]
+					print "system user " ao[i] " - bound to " adm[ao[i]] "  (no saved config from before Aug 2026 to compare with - check every admin account)" } }' "$T/uold" "$T/unow" >> "$T/f4"
 	fi
 	finding REVIEW "Saved config: new system users or EPA failures let through - make sure an admin did this" "$T/f4"
 	# the update_c08937.pl payload creates the admin account sec_monitor (SpiderLabs)
@@ -1529,6 +1766,7 @@ done
 	e9fe43968c6c0955300e3bc4d7fb0b05a18570b4733aaf4f5c6f7f09be5a242c c98aee75c5e199c9b5527984ce48675d665963f7cab8ce9f2e82465de6b58727
 	72cff13fcba75504485e94fa6bfc5e9363e860f49efdba68feb583148eec38f2 b9b0a4380db462c706597bd3e6a08d4d99fcbbf0919d63eb99b488d396c8ce63
 	c2f5532f3209dce0bd30ead47a2616a74ce8170324ef68dfd59acac3f5f1da34"
+	SELFH=$(h256 "$0" 2>/dev/null)
 	# names with a line break cannot be read line by line (NetScaler's own
 	# bm_prefix_<base64> bookmarks have them); they are left out of the hashing
 	NL=$(printf '\n_'); NL=${NL%_}
@@ -1542,8 +1780,10 @@ done
 		set -- $(dirs "/ /var"); [ $# -gt 0 ] && find "$@" -maxdepth 1 -type f -size -2000k ! -name "*$NL*" 2>>"$E"
 		# the Platypus agent's folder: a compiled agent is larger than 2 MB
 		[ -d "$R/netscaler.local" ] && find "$R/netscaler.local" -type f ! -name "*$NL*" 2>>"$E"
-	} | grep -v -e '/nshunt\.' -e 'results-nshunt' | while IFS= read -r f; do
+	} | grep -v -E '/\.?results-nshunt[^/]*\.txt$' | while IFS= read -r f; do
 		if ! x=$(h256 "$f" 2>>"$E") || [ -z "$x" ]; then echo "${f#$R}: could not be hashed" >> "$E"; continue; fi
+		# this script itself (by its hash - a payload may be named nshunt.*)
+		[ "$x" = "$SELFH" ] && continue
 		case " $(echo $H) " in *" $x "*) [ -n "$x" ] && printf '%s  %s  (known web shell / payload SHA-256)\n' "$(when "$f")" "${f#$R}" ;; esac
 	done > "$T/f"
 	# Code markers where packages and theme files live:
@@ -1553,18 +1793,25 @@ done
 	# shellcheck disable=SC2046
 	set -- $(dirs "$PLACES")
 	if [ $# -gt 0 ]; then
-		find "$@" -type f -size -2000k -exec env LC_ALL=C grep -la -e '7489a0f93c67fa5cdaeb4b921d90594d' \
-			-e 'Rhfajaf1H992' -e 'e826d7ddf3c85920' -e '.ns_suidcmd' {} + 2>>"$E"
+		# the Unit 42 web shell strings count in code only (PHP, a script, a
+		# program or a package) - notes and IoC lists name them too
+		find "$@" -type f -size -2000k -exec env LC_ALL=C grep -laF -e '7489a0f93c67fa5cdaeb4b921d90594d' \
+			-e 'Rhfajaf1H992' -e 'e826d7ddf3c85920' -e '.ns_suidcmd' {} + 2>>"$E" |
+			while IFS= read -r f; do
+				h=$(head -c 7 "$f" 2>/dev/null | tr -d '\177')
+				if LC_ALL=C grep -qaE '<\?php|<\?=' "$f" || [ "$(head -c 2 "$f" 2>/dev/null)" = '#!' ] || [ "$h" = '!<arch>' ] || [ "${h#ELF}" != "$h" ]
+				then printf '%s\n' "$f"; else printf '%s\n' "$f" >> "$T/xux"; fi
+			done
 		# WHIPSHOT's header name counts where code reads it ($_SERVER, getenv, <?php)
 		find "$@" -type f -size -2000k -exec env LC_ALL=C grep -la 'HTTP_X_UX' {} + 2>>"$E" |
 			while IFS= read -r f; do
-				if LC_ALL=C grep -qaE '<\?php|<\?=|\$_SERVER|getenv' "$f"; then printf '%s\n' "$f"; else printf '%s\n' "$f" >> "$T/xux"; fi
+				if LC_ALL=C grep -qaE '<\?php|<\?=|\$_SERVER\[[^]]*HTTP_X_UX|getenv[[:space:]]*\([^)]*HTTP_X_UX' "$f"; then printf '%s\n' "$f"; else printf '%s\n' "$f" >> "$T/xux"; fi
 			done
 		find "$@" -type f -size -2000k -exec env LC_ALL=C grep -laE 'HTTP_NSC_(CLIENTTYPE|LDAP)' {} + 2>>"$E" |
-			while IFS= read -r f; do LC_ALL=C grep -qaE 'eval|base64_decode|assert|system|passthru|shell_exec' "$f" && printf '%s\n' "$f"; done
+			while IFS= read -r f; do LC_ALL=C grep -qaE '(eval|base64_decode|assert|system|passthru|shell_exec)[[:space:]]*\(' "$f" && printf '%s\n' "$f"; done
 	fi | sort -u | list | sed 's/$/  (web shell code: WHIPSHOT headers or the Unit 42 web shell)/' >> "$T/f"
 	finding COMPROMISE "Known web shells and payloads (by SHA-256 or by their code)" "$T/f"
-	[ -f "$T/xux" ] && list < "$T/xux" > "$T/f3" && finding REVIEW "Known web shells and payloads: a web shell header name (HTTP_X_UX) without code that reads it - open the file" "$T/f3"
+	[ -f "$T/xux" ] && sort -u "$T/xux" | list > "$T/f3" && finding REVIEW "Known web shells and payloads: their names or keys (HTTP_X_UX, Unit 42 web shell) in a file without code - notes or IoC lists? open the file" "$T/f3"
 	# PHP / XHTML under /var/netscaler outside the management GUI, websocketd and
 	# the web folders checked above (Deyda): compare with a clean box
 	[ -d "$R/var/netscaler" ] && find "$R/var/netscaler" -type f \( -name '*.php' -o -name '*.xhtml' \) \
@@ -1610,8 +1857,8 @@ done
 	# hands out a responder policy for the SAML endpoints that must be bound to
 	# EVERY VPN and authentication vserver; an older version did not cover
 	# /saml/login. Recognised here as a responder policy that drops or resets
-	# requests to /cgi/samlauth or doAuthentication (and /saml/login), bound to the
-	# vserver or globally. Responder policies do nothing while the Responder
+	# requests to /cgi/samlauth (and /saml/login), bound to the vserver with
+	# -type AAA_REQUEST. Responder policies do nothing while the Responder
 	# feature is off (a field case, via the Poppelgaard checker 1.11).
 	# Saved config, per partition.
 	for c in "$R/flash/nsconfig/ns.conf" "$R"/flash/nsconfig/partitions/*/ns.conf; do
@@ -1622,35 +1869,56 @@ done
 		*) where="default partition" ;;
 		esac
 		awk -v where="$where" '
-		# tok: the first (possibly "quoted") word of s; the rest goes to REST
-		function tok(s,   t) { sub(/^ +/, "", s)
-			if (substr(s, 1, 1) == "\"" && match(s, /^"[^"]*"/)) { t = substr(s, 2, RLENGTH - 2); REST = substr(s, RLENGTH + 1) }
+		# tok: the first word of s, "double" or \047single\047 quoted names whole;
+		# the rest goes to REST
+		function tok(s,   t, q, e) { sub(/^ +/, "", s); q = substr(s, 1, 1)
+			if ((q == "\"" || q == "\047") && (e = index(substr(s, 2), q))) { t = substr(s, 2, e - 1); REST = substr(s, e + 2) }
 			else { match(s, /^[^ ]*/); t = substr(s, 1, RLENGTH); REST = substr(s, RLENGTH + 1) }
 			return t }
-		{ l = tolower($0); s = $0; sub(/^[^ ]+ +[^ ]+ +[^ ]+ +/, "", s) }
-		l ~ /^add (vpn|authentication) vserver / { v = $2 " vserver " tok(s); if (!(v in V)) { V[v] = 1; O[++n] = v } }
 		# names with spaces are shown "quoted" (the --share copy masks them whole)
 		function shown(v,   k) { k = index(v, " vserver ") + 8; return index(substr(v, k + 1), " ") ? substr(v, 1, k) "\"" substr(v, k + 1) "\"" : v }
-		l ~ /^add responder policy / && l ~ /\/cgi\/samlauth|doauthentication/ && l ~ /" +(drop|reset)( |$)/ { P[tok(s)] = (l ~ /\/saml\/login/) ? 2 : 1 }
+		{ l = tolower($0); s = $0; sub(/^[^ ]+ +[^ ]+ +[^ ]+ +/, "", s) }
+		l ~ /^add (vpn|authentication) vserver / { v = $2 " vserver " tok(s); if (!(v in V)) { V[v] = 1; O[++n] = v } }
+		# the mitigation: a responder policy that drops or resets requests whose
+		# path equals one of the SAML endpoints (the quoted path in the rule, not
+		# any text containing it). The rest of the rule cannot be checked here.
+		l ~ /^add responder policy / && index(l, "\\\"/cgi/samlauth\\\"") && l ~ /" +(drop|reset)( |$)/ {
+			P[tok(s)] = index(l, "\\\"/saml/login\\\"") ? 2 : 1 }
 		l ~ /^bind responder global / { G[tok(s)] = 1 }
 		l ~ /^enable ns feature / && l ~ / responder( |$)/ { RF = 1 }
-		l ~ /^bind (vpn|authentication) vserver / { v = $2 " vserver " tok(s)
-			if (match(REST, / -policy(Name)? +("[^"]*"|[^ ]+)/)) { b = substr(REST, RSTART, RLENGTH)
-				sub(/^ -policy(Name)? +/, "", b); gsub(/"/, "", b); B[v, b] = 1 } }
+		# vserver bindings count only at the AAA request bind point (-type AAA_REQUEST)
+		l ~ /^bind (vpn|authentication) vserver / { v = $2 " vserver " tok(s); r = REST
+			if (match(r, / -[Pp]olicy(Name)? +/)) { b = tok(substr(r, RSTART + RLENGTH)); ty = "(none)"
+				if (match(tolower(r), / -type +[a-z_]+/)) { ty = substr(r, RSTART, RLENGTH); sub(/^ -type +/, "", ty) }
+				if (toupper(ty) == "AAA_REQUEST") B[v, b] = 1; else W[v, b] = ty } }
 		END { if (n && !RF) { printf "Responder feature is not enabled - responder policies do nothing  (%s)\n", where; exit }
-			for (i = 1; i <= n; i++) { best = 0
-				for (p in P) if ((((O[i], p) in B) || (p in G)) && P[p] > best) best = P[p]
-				if (best == 0) printf "%s  - not protected  (%s)\n", shown(O[i]), where
-				else if (best == 1) printf "%s  - older version of the policy only - replace it with the current one  (%s)\n", shown(O[i]), where } }' "$c" 2>>"$E"
-	done > "$T/f"
+			for (i = 1; i <= n; i++) { best = 0; wt = ""; gl = 0
+				for (p in P) { if (((O[i], p) in B) && P[p] > best) { best = P[p]; bp[O[i]] = "-policy " (index(p, " ") ? "\"" p "\"" : p) }
+					if ((O[i], p) in W) wt = W[O[i], p]; if ((p in G) && P[p] > gl) gl = P[p] }
+				if (best == 2) { printf "ok\t%s  - bound: %s  (%s)\n", shown(O[i]), bp[O[i]], where; continue }
+				if (best == 1) printf "%s  - older version of the policy only - replace it with the current one  (%s)\n", shown(O[i]), where
+				else if (wt != "") printf "%s  - policy bound with -type %s, it has to be -type AAA_REQUEST  (%s)\n", shown(O[i]), wt, where
+				else if (gl) printf "%s  - policy only bound globally, not to this vserver as Citrix describes  (%s)\n", shown(O[i]), where
+				else printf "%s  - not protected  (%s)\n", shown(O[i]), where } }' "$c" 2>>"$E"
+	done > "$T/f0"
+	# vservers with a recognised policy: the rule itself cannot be verified here
+	grep "^ok$(printf '\t')" "$T/f0" | cut -f2- > "$T/f9"; grep -v "^ok$(printf '\t')" "$T/f0" > "$T/f"
+	if [ -s "$T/f9" ]; then
+		{ echo "nshunt recognises the policy only by the SAML paths it names and its DROP action; it"
+		  echo "cannot check that the rule works. Compare it with the one from Citrix support:"
+		  echo "  show responder policy <name>"; } >> "$T/f9"
+	fi
 	if [ -s "$T/f" ]; then
 		grep -q 'Responder feature is not enabled' "$T/f" && echo "enable it: enable ns feature RESPONDER ; save ns config" >> "$T/f"
 		{ echo "SAML authentication is configured, so this box is affected (Citrix: no fixed build yet)."
 		  echo "Until the fix: get the current SAML responder policy from Citrix support and bind it"
 		  echo "to EVERY VPN and authentication virtual server (-type AAA_REQUEST), then save ns config."
+		  echo "nshunt recognises the policy by the SAML paths it covers and its DROP action only -"
+		  echo "compare the rule with the one from Citrix support."
 		  echo "Upgrade as soon as the Citrix security bulletin for this issue is out."; } >> "$T/f"
 	fi
 	finding REVIEW "New SAML vulnerability (Citrix, Oct 2026 - the CTX697096 fixed builds do not fix it): mitigation policy missing or outdated on these vservers" "$T/f"
+	finding REVIEW "New SAML vulnerability: a mitigation policy is bound, its rule is not verified - compare it with Citrix's" "$T/f9"
 ) || { echo "[SKIPPED] check 25 (SAML responder policy) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- Summary ---------------------------------------------------------------
@@ -1722,17 +1990,18 @@ if [ "$a" -gt 0 ]; then
 		         echo "               The box runs a fixed build; when it started running is unknown."
 		         echo "               Check attempt times and outcomes against your SIEM."
 		     fi
-		     if [ -f "$T/saml-era" ]; then
-		         echo "               Attempts since 2 Oct are marked: SAML is configured, and the new"
-		         echo "               SAML issue (no fix yet) can run commands on fixed builds too -"
-		         echo "               treat them as possibly successful and check the box closely."
-		     fi
 		     echo "               This build includes fixes for CVE-2026-88771/88772. Build status"
 		     echo "               does not rule out other vulnerabilities or prior compromise." ;;
 		no)  echo "               The box runs a VULNERABLE build: an attempt may have worked"
 		     echo "               without leaving a trace nshunt knows. Upgrade now." ;;
 		*)   echo "               Make sure the box runs a fixed build (show ns version)." ;;
 		esac
+		# whatever the build: the new SAML issue has no fix yet
+		if [ -f "$T/saml-era" ]; then
+			echo "               Attempts since 2 Oct are marked: SAML is configured, and the new"
+			echo "               SAML issue (no fix yet) can run commands on fixed builds too -"
+			echo "               treat them as possibly successful and check the box closely."
+		fi
 	else
 		echo "  ATTEMPT    - attack attempts in the logs (on their own not proof of success);"
 		echo "               together with the COMPROMISE findings they show when and"
