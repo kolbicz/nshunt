@@ -62,8 +62,12 @@ build has been **running** (UTC). Installing a build does not protect the box -
 the old build runs until the next boot - so this is the first boot after the
 install (`installns_state_post_reboot`), else a boot within a day of the
 install, else the install time of `/flash/ns-<build>.gz` (then the output says
-the reboot is not known). Command injection attempts from before that time are
-marked `BEFORE the fixed build was running` - check those first. 15.1 is a
+the reboot is not known). A box deployed from the image has no upgrade record
+in `/var/nsinstall`; the output then says so instead of giving a time. Command
+injection attempts from before that time are
+marked `BEFORE the fixed build was running` - check those first. On a box
+with SAML authentication configured, attempts from 2 October 2026 on are also
+marked: the new SAML issue (no fix yet) can run commands on fixed builds. 15.1 is a
 Technology Preview: it is shown as vulnerable, there is no fix for it yet.
 
 The numbers in the `RESULT` line count finding blocks, i.e. kinds of evidence,
@@ -73,7 +77,7 @@ section that explains the result in plain words.
 Example:
 
 ```
-NetScaler quick hunt 2.0 - ns01 - 2026-09-30 14:43
+NetScaler quick hunt 2.1 - ns01 - 2026-09-30 14:43
 Build: 14.1-73.37 - includes the fix for CVE-2026-88771/88772
        fixed build running since 2026-09-28 11:55 UTC (first boot after the install; installed 2026-09-28 11:48 UTC)
 
@@ -148,7 +152,7 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
 5. **Files written by the web server** - files owned by `nobody` in
    `/var/netscaler/logon`, `/var/netscaler/gui` and `/netscaler/ns_gui`.
 6. **Hidden files** in web folders. The published web shell names
-   `.ctxs.receiver` and `.local_journal` are `COMPROMISE`.
+   `.ctxs.receiver`, `.slap.receiver` and `.local_journal` are `COMPROMISE`.
 7. **Credential stealers in the login page** - JavaScript that contains an
    external URL next to code that captures or sends data (`password`, `fetch(`,
    `XMLHttpRequest`, `sendBeacon`, `atob`, `new Image`, ...), anywhere in the
@@ -211,7 +215,9 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     `UXD_IDLE_EXIT`, dropped SLAPSHOT Python files, running `lula`,
     `update_c*.pl`, `/.x`, `xd7h` or `nsmon` processes, and the `nsmon.pl` Perl
     implant (`/var/tmp/.nsmon`, `/var/tmp/.s`, its cron job, a Perl listener on a
-    port between 41000 and 41999). The Platypus remote-access agent (TENEX) is
+    port between 41000 and 41999), and the SAML-attack kit's `slapshot.py`,
+    `whipd.py` and `.slap` agent processes or Python listeners on port 9909 /
+    9910. The Platypus remote-access agent (TENEX) is
     `COMPROMISE` when a file in `/netscaler.local/` carries the agent's signing
     key or at least two of its code signatures (or its known hash), or the
     certificate in `/var/core/.ns-cache/` comes from the Platypus default CA.
@@ -221,33 +227,46 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     `httpaccess-vpn.log`) - `404` answers over 5 KB on `/vpn/media/`,
     `/vpn/scripts/` or `/vpn/theme/` are `COMPROMISE`: WHIPSHOT hides its output
     behind a fake 404, while the stock 404 page is a few hundred bytes. Requests
-    for `<hex>.ico` / `.sig` or the known web shell package names
+    for `<hex>.ico` / `.sig`, `/vpn/media/nsgclient.ico` (not a stock file), or
+    the known web shell package names
     (`nsginstaller<N>`, `nsgclient18`, `nsgclient18_32`, `nsgser18`, `nsgsupport`, `nsgpackage64`,
     `nsgbuild`, `nsg64` `.deb` - not `nsginstaller64.deb`, the real Linux client
     installer), POSTs to those static paths,
-    and `INDEX:<base64>` or base64-only User-Agents (shown decoded) are `ATTEMPT`.
+    and `INDEX:<base64>`, `K:<base64>#` or base64-only User-Agents (shown
+    decoded) are `ATTEMPT`.
 17. **Crashes and crash reboots** - crash dumps and log lines from the last 14
     days, in `/var/core`, `/var/crash`, `ns.log*` and `/var/log/messages*`:
     packet engine crashes and failed DTLS handshakes (CVE-2026-88772 exploits
     crash the packet engine), AAA daemon (`nsaaad`) failures and Pitboss
-    reboots. A crash alone does not prove an attack (`REVIEW`). A
+    reboots. A crash alone does not prove an attack (`REVIEW`). A short summary
+    per process shows the number of crashes, the signal, the highest restart
+    count and whether Pitboss gave up restarting it (the SAML attack crashes
+    `nsaaad` repeatedly). Pitboss writes each message to both logs; it is counted
+    once. A planned reboot from the CLI is not counted. A
     failed DTLS handshake (`Handshake failure-Internal Error`) followed within 10
     minutes by a crash is `COMPROMISE` - Mandiant saw that pair on successful
     exploitation.
 18. **Known attacker IP addresses** published by Mandiant, GreyNoise, Lupovis,
     Gotham Technology Group, Unit 42, PitScaler.com, Arctic Wolf, SpiderLabs,
-    Rapid7 and TENEX, and the domains `echvista.com`, `entretiensol.com` and
-    `white-guard.pro`, in `ns.log*`, `/var/log/messages*` and the web access
+    Rapid7, TENEX and Sygnia, and the domains `echvista.com`, `entretiensol.com`,
+    `white-guard.pro`, `pylrk.cc` / `pyrlnk.cc` (SAML attack payload server),
+    `gs.thc.org` and `gsocket.io`, in `ns.log*`, `/var/log/messages*` and the web access
     logs, and in current connections. The Cloudflare WARP addresses on the list
-    are marked, because ordinary WARP users share them. About 65 opportunistic
-    scanners (GreyNoise) and an unattributed wave (TENEX) are listed separately
+    are marked, because ordinary WARP users share them. About 100 opportunistic
+    scanners and residential-proxy probe senders (GreyNoise, Gotham) and an
+    unattributed wave (TENEX) are listed separately
     as a hunting lead only, and so are five domains that only appear in the
     attackers' certificate (`REVIEW`, moderate confidence).
 19. **Files written by the published exploit payloads** - known dropped file
     names (`/.x`, `/s`, `lula`, `/var/1.py`, `update_c*.pl`, `update_result_*.tgz`, `wtw*` /
     `watchTowr*` / `boom*` in `/tmp` and `/var/tmp`,
     `themes/wt88771*`, `nx_verify.html`, `c88771*`, `xua.html`, `/var/tmp/sh`,
-    `insight-new.js`, `admin_ui/e.txt` / `log.txt`), small files in the web
+    `insight-new.js`, `admin_ui/e.txt` / `log.txt`, `nx_proof.html`,
+    `Nx_<n>.html` and files with the `Nx-zD` marker), the SAML attack's payload
+    `/v` and its kit (`/nsconfig/.slap/`, `/var/tmp/.ux/`, `slapshot.py`,
+    `whipd.py`, `.slap*` / `.s2loot*` files in `/tmp` and `/var/tmp`,
+    `httpd.conf.slap.bak`, and start lines for it in `rc.netscaler`,
+    `nsafter.sh`, `nsbefore.sh` or a crontab), small files in the web
     folders containing the output of `id` (in `/tmp` / `/var/tmp` only `REVIEW` -
     it may be someone's test), and gzip, zip or tar archives disguised as web
     files or without a file extension - how a
@@ -257,15 +276,18 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     some are also real Citrix client package names, so only their content
     (check 13, 23) decides.
 20. **Exploit, scanner and probe strings** in the web and error logs - canary
-    and scanner strings (`ns-88771-poc`, `PoCbit`, `NX-CVE-OK`, `httpworkbench`),
-    requests for the `.ctxs.receiver` web shell, 1-byte `nsepa.deb` probes,
+    and scanner strings (`ns-88771-poc`, `PoCbit`, `NX-CVE-OK`, `Nx-zD`,
+    `httpworkbench`, out-of-band test services such as `oast.fun`, `dnsl.cc`,
+    `webhook.site`, `dnshook.site`, the `Team-NetScaler-Inventory` User-Agent,
+    requests for `/nsconmsg`), requests for the `.ctxs.receiver` /
+    `.slap.receiver` web shells and their `receiver(.v2).min.css` aliases, 1-byte `nsepa.deb` probes,
     `vp_probe_nonexist`, `scanner-probe` logins, requests for
     `/logon/LogonPoint/Authentication/GetUserName`, version fingerprinting
     (`rdx_en.json.gz`, the admin GUI's `ui.css` requested on the Gateway), and
     errors for package or icon
-    files in Gateway folders, each with its status codes and source IPs. The
-    exploit canary `nx_verify.html` served with a `2xx` status is `COMPROMISE`:
-    it only exists if an injected command ran. HeadlessChrome requests are
+    files in Gateway folders, each with its status codes and source IPs. An
+    exploit proof file (`nx_verify.html`, `nx_proof.html`, `Nx_<n>.html`) served
+    with a `2xx` status is `COMPROMISE`: it only exists if an injected command ran. HeadlessChrome requests are
     `REVIEW`. PHP errors raised inside a file with a non-PHP extension (`.sig`,
     `.deb`, `.ico`, ...) in the error logs are `COMPROMISE`: PHP executed it.
     Also `ATTEMPT`: payload strings (`xd7h/`, `/dev/tcp/`, `nc -e`,
@@ -293,14 +315,15 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     traces come together - a script adding or binding a system user, a script
     switching EPA to `NO_AUTH`, the `c1`/`c2` dumps. One of them alone, the same
     commands from an admin PC (GUI, SSH, NITRO - the line shows the admin and IP)
-    and unbound EPA policies are `REVIEW`. The
+    and policies unbound from a Gateway or authentication vserver (EPA, the SAML
+    mitigation) are `REVIEW`. The
     saved `ns.conf` is compared with the newest older copy from before August
     2026 (`ns.conf.NS<old build>` from an upgrade, `ns.conf.0-4`, `.bak`): system
     users added since, and `NO_AUTH` EPA actions, are `REVIEW`. The account
     `sec_monitor`, which the `update_c08937.pl` payload creates, is `COMPROMISE`.
 23. **Known web shells and payloads by hash and code** - SHA-256 of published
     web shells and payloads (GreyNoise, IFIN, eSentire, Arctic Wolf, Unit 42,
-    SpiderLabs) in
+    SpiderLabs, and three files of the SAML attack) in
     the web, plugin and media folders, `/tmp`, `/var/tmp` and the top of `/` and
     `/var`; WHIPSHOT code (`HTTP_X_UX` read by code, `HTTP_NSC_CLIENTTYPE` /
     `LDAP` with `eval`) and the Unit 42 web shell's key, passphrase and token,
@@ -314,12 +337,14 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     `set ns tcpParam -enhancedISNgeneration ENABLED`, it is `REVIEW`, with the
     fix and the check command. Only the saved config is read: run
     `save ns config` first if you changed it live.
-25. **SAML PrefixList workaround** - a SAML login response with a very long
-    PrefixList crashes the AAA daemon and Pitboss then reboots the box, also on
-    fixed builds. Citrix support hands out a responder policy that drops such
-    requests. A config with SAML login (`add authentication samlAction`) where
-    no responder policy that checks `PrefixList` is bound to an authentication
-    or VPN virtual server is `REVIEW`.
+25. **New SAML vulnerability (Citrix, October 2026)** - not fixed by the
+    CTX697096 builds; a security bulletin with fixed builds is announced.
+    Citrix: a NetScaler is affected when its config has `add authentication
+    samlAction` or `add authentication samlIdPProfile`. Until the fix,
+    Citrix support provides a mitigation (a responder policy) that must be
+    bound to every VPN and authentication virtual server. On a config with
+    SAML, each VPN or authentication vserver without it, or with an older
+    version of it, is `REVIEW`.
 
 ## Sharing the output
 
@@ -334,7 +359,7 @@ your organisation - for example to help improve nshunt. It masks:
 
 | Masked | Replaced with |
 |--------|---------------|
-| The appliance's host name (any case, short and full) | `HOST` |
+| The appliance's host name (any case, short and full; not the default `ns`) | `HOST` |
 | Internal IPv4 and IPv6 addresses (also inside URLs) and the box's own NSIP / VIP | `INTERNAL-1`, `INTERNAL-2`, ... |
 | Public IPs outside attack findings (e.g. monitoring, admin PCs) | `PUBLIC-1`, ... |
 | User names: bookmark files, admins, system accounts, crontab owners | `USER-1`, ... |
@@ -405,11 +430,11 @@ Intelligence ([hunting guide](https://cloud.google.com/blog/topics/threat-intell
 Palo Alto Networks Unit 42 ([threat brief](https://unit42.paloaltonetworks.com/netscaler-zero-days-exploited/)),
 SpiderLabs ([hunt indicators](https://www.levelblue.com/blogs/spiderlabs-blog/citrix-netscaler-cve-2026-88771-observed-exploitation-artifacts-and-hunt-indicators)),
 TENEX ([Platypus analysis](https://tenex.ai/blog/what-tenex-observed-inside-active-exploitation-of-netscaler-zero-day/)), Rapid7, GreyNoise, watchTowr, Lupovis, CERT-EU and Kevin Beaumont. The
-checks added in 1.3 and 1.6 are based on the indicator lists of Thomas
+checks added in 1.3, 1.6 and 2.1 are based on the indicator lists of Thomas
 Poppelgaard's [netscaler-ctx697096-checker](https://github.com/ThomasPoppelgaard/netscaler-ctx697096-checker)
-(v1.7 - v1.9), which include indicators from Gotham Technology Group, Manuel
+(v1.7 - v1.11), which include indicators from Gotham Technology Group, Manuel
 Winkel (Deyda Consulting), PitScaler.com, Beazley Security, Arctic Wolf,
-eSentire, IFIN, Elastic and watchTowr.
+eSentire, IFIN, Elastic, Sygnia and watchTowr.
 
 ## License
 
