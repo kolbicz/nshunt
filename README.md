@@ -66,8 +66,10 @@ the reboot is not known). A box deployed from the image has no upgrade record
 in `/var/nsinstall`; the output then says so instead of giving a time. Command
 injection attempts from before that time are
 marked `BEFORE the fixed build was running` - check those first. On a box
-with SAML authentication configured, attempts from 2 October 2026 on are also
-marked: the new SAML issue (no fix yet) can run commands on fixed builds. 15.1 is a
+with SAML authentication configured, a third line shows whether the build
+includes the fix for CVE-2026-88779 (CTX697174: 14.1-73.41, 13.1-64.28); if it
+does not, attempts from 2 October 2026 on (the SAML attack wave) are marked
+too. 15.1 is a
 Technology Preview: it is shown as vulnerable, there is no fix for it yet.
 
 The numbers in the `RESULT` line count finding blocks, i.e. kinds of evidence,
@@ -77,7 +79,7 @@ section that explains the result in plain words.
 Example:
 
 ```
-NetScaler quick hunt 2.2 - ns01 - 2026-09-30 14:43
+NetScaler quick hunt 2.3 - ns01 - 2026-09-30 14:43
 Build: 14.1-73.37 - includes the fix for CVE-2026-88771/88772
        fixed build running since 2026-09-28 11:55 UTC (first boot after the install; installed 2026-09-28 11:48 UTC)
 
@@ -256,8 +258,8 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     decoded) are `ATTEMPT`.
 17. **Crashes and crash reboots** - crash dumps and log lines from the last 14
     days, in `/var/core`, `/var/crash`, `ns.log*` and `/var/log/messages*`:
-    packet engine crashes and failed DTLS handshakes (CVE-2026-88772 exploits
-    crash the packet engine), AAA daemon (`nsaaad`) failures and Pitboss
+    packet engine crashes (also `nsppe: PE ... got signal`) and failed DTLS
+    handshakes (CVE-2026-88772 exploits crash the packet engine), AAA daemon (`nsaaad`) failures and Pitboss
     reboots. A crash alone does not prove an attack (`REVIEW`). A short summary
     per process shows the number of crashes, the signal, the highest restart
     count and whether Pitboss gave up restarting it (the SAML attack crashes
@@ -269,8 +271,8 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     exploitation.
 18. **Known attacker IP addresses** published by Mandiant, GreyNoise, Lupovis,
     Gotham Technology Group, Unit 42, PitScaler.com, Arctic Wolf, SpiderLabs,
-    Rapid7, TENEX and Sygnia, and the domains `echvista.com`, `entretiensol.com`,
-    `white-guard.pro`, `pylrk.cc` / `pyrlnk.cc` (SAML attack payload server),
+    Rapid7, TENEX, Sygnia and Beazley, and the domains `echvista.com`, `entretiensol.com`,
+    `white-guard.pro`, `pylrk.cc` (SAML attack payload server),
     `gs.thc.org` and `gsocket.io`, in `ns.log*`, `/var/log/messages*` and the web access
     logs, and in current connections (from the box out: `COMPROMISE`; to a
     service of the box: `ATTEMPT`). The Cloudflare WARP addresses on the list
@@ -287,9 +289,11 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     `xua.html`, `insight-new.js`, `admin_ui/e.txt` / `log.txt`, `nx_proof.html`,
     `Nx_<n>.html` and files with the `Nx-zD` marker), the SAML attack's kit
     (`/nsconfig/.slap/`, `/var/tmp/.ux/`, `slapshot.py`, `whipd.py`, `.slap*` /
-    `.s2loot*` files in `/tmp` and `/var/tmp`, `httpd.conf.slap.bak`). Short
-    names the payloads also used (`/s`, `/.x`, `lula`, `/var/1.py`, `/var/tmp/sh`,
-    `boom*`, `wtw*`) and the SAML attack's payload name `/v` are ordinary names
+    `.s2loot*` files in `/tmp` and `/var/tmp`, `httpd.conf.slap.bak`, its upload
+    staging `loot_nsconfig.tgz`, `loot_nshist.tgz`, `loot_httpd.conf`,
+    `loot_diag.txt`). Short names the payloads also used (`/s`, `/.x`, `lula`,
+    `/var/1.py`, `/var/tmp/sh`, `/var/tmp/.host`, `boom*`, `wtw*`, other `loot_*`
+    files) and the SAML attack's payload name `/v` are ordinary names
     too: `REVIEW` (a known hash is `COMPROMISE` in check 23). Small files in the web
     folders containing the output of `id` (in `/tmp` / `/var/tmp` only `REVIEW` -
     it may be someone's test), and gzip, zip or tar archives disguised as web
@@ -316,7 +320,9 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     `REVIEW`. PHP errors raised inside a file with a non-PHP extension (`.sig`,
     `.deb`, `.ico`, ...) in the error logs are `COMPROMISE`: PHP executed it.
     Also `ATTEMPT`: payload strings (`xd7h/`, `/dev/tcp/`, `nc -e`,
-    `base64 -w0`, `exec-ok`, web shell header names, Platypus agent traffic),
+    `base64 -w0`, `exec-ok`, `chmod 6555`, `nsshutdown -R`, `;#NSX...`, the SAML
+    attack's `:443/t/<hex>` download path, web shell header names, Platypus agent
+    install, token and traffic),
     requests for the `.local_journal` web shell alias and `insight-new.js`,
     attack payloads in
     login-page requests (still visible after `ns.log` has rotated), any
@@ -327,7 +333,8 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     credentials or keys (`ldapsearch`, `openssl s_client`, `F1.key` / `F2.key`,
     `/flash/nsconfig/keys`), restart the web server (`httpd -k restart`), set the
     setuid bit (`chmod u+s`, `ug+s`, `4755`, any path), reload it (`kill -HUP` on
-    httpd) or force a reboot (`nsshutdown -R`). A search on its own (`grep`,
+    httpd), force a reboot (`nsshutdown -R`) or run `ns_monuploadd_err.pl -WR`
+    by hand (CISA). A search on its own (`grep`,
     `awk`, `sed`), by you or by other scanners, is ignored; one with a command
     chained to it is not. The newest lines are shown.
 22. **Admin accounts and EPA** - a 2026 payload needs no web shell: through
@@ -354,31 +361,35 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     `sec_monitor`, which the `update_c08937.pl` payload creates, is `COMPROMISE`.
 23. **Known web shells and payloads by hash and code** - SHA-256 of published
     web shells and payloads (GreyNoise, IFIN, eSentire, Arctic Wolf, Unit 42,
-    SpiderLabs, and three files of the SAML attack) in
-    the web, plugin and media folders, `/tmp`, `/var/tmp` and the top of `/` and
-    `/var`; WHIPSHOT code (`HTTP_X_UX` read by code, `HTTP_NSC_CLIENTTYPE` /
+    SpiderLabs, and files of the SAML attack: the `/v` script, kit, chisel and
+    Sliver implants) in the web, plugin and media folders, `/tmp`, `/var/tmp`
+    and the top of `/` and `/var` (there also compiled implants up to 20 MB); WHIPSHOT code (`HTTP_X_UX` read by code, `HTTP_NSC_CLIENTTYPE` /
     `LDAP` with `eval(`-style calls) and the Unit 42 web shell's key, passphrase
     and token in code (PHP, a script, a program or a package). Hashes change per
     victim, so the code markers matter more. These names in a file without code
     (documentation, notes, IoC lists) are `REVIEW`.
-    PHP / XHTML files elsewhere under `/var/netscaler` are `REVIEW`.
+    PHP / XHTML files elsewhere under `/var/netscaler` are `REVIEW`, and so is
+    the known vulnerable copy of `/netscaler/ns_monuploadd_err.pl` found on a
+    fixed build (put back after the upgrade?).
 24. **CVE-2026-88778 (Enhanced ISN Generation)** - the upgrade alone does not
     fix this one. If a saved config (default or admin partition) has a TCP-based
     virtual server (HTTP, SSL, TCP, Gateway, ...) and does not contain
     `set ns tcpParam -enhancedISNgeneration ENABLED`, it is `REVIEW`, with the
     fix and the check command. Only the saved config is read: run
     `save ns config` first if you changed it live.
-25. **New SAML vulnerability (Citrix, October 2026)** - not fixed by the
-    CTX697096 builds; a security bulletin with fixed builds is announced.
-    Citrix: a NetScaler is affected when its config has `add authentication
-    samlAction` or `add authentication samlIdPProfile`. Until the fix,
-    Citrix support provides a mitigation (a responder policy) that must be
-    bound to every VPN and authentication virtual server with `-type
-    AAA_REQUEST`. On a config with SAML, each VPN or authentication vserver
-    without it, with an older version of it, bound with another type or only
-    globally, or with the Responder feature off, is `REVIEW`. nshunt cannot
-    verify the rule itself: a bound mitigation is listed as `REVIEW` too, to
-    compare with the one from Citrix support.
+25. **CVE-2026-88779 (SAML, CTX697174)** - a memory overflow in SAML handling
+    that leads to denial of service, attacked in the wild. A NetScaler with
+    `add authentication samlAction` (SP) or `add authentication samlIdPProfile`
+    (IdP) on a build before 14.1-73.41 / 13.1-64.28 (FIPS: 14.1-73.41 FIPS,
+    13.1-37.282) is `REVIEW`: upgrade, also after the CTX697096 upgrade. Until
+    then Citrix offers stopgaps: the Global Deny List signatures (NetScaler
+    Console) or a responder policy from Citrix support, bound to every VPN and
+    authentication virtual server with `-type AAA_REQUEST`. nshunt lists each
+    vserver without the policy, with an older version of it, bound with another
+    type or only globally, or with the Responder feature off. It cannot verify
+    the rule itself: a bound policy is listed as `REVIEW` too, to compare with
+    the one from Citrix support. A fixed build needs none of this; an
+    unidentified build is reported as "fix status unknown".
 
 ## Sharing the output
 

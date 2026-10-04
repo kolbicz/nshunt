@@ -18,7 +18,7 @@ grep -q "$(printf '\r')" "$0" && printf '%s\n' "ERROR: $0 has Windows line endin
 # logs or a check that crashed) or the report could not be saved - never
 # trust "no findings" with exit 2.
 
-VERSION=2.2
+VERSION=2.3
 
 # anonymise <host>: stdin report -> copy that can leave the organisation.
 # Masks the host name, internal IPs and the box's own addresses, public IPs
@@ -124,7 +124,7 @@ anonymise() {
 		l = swap(l, "-policyName [^ \"]+", 12, 0, "POLICY", "")
 		payload = (l ~ /tried:|decoded |INDEX:|"K:/)
 		if (!payload) {
-			l = swap(l, "://[A-Za-z][A-Za-z0-9.-]*[A-Za-z]", 3, 0, "DOMAIN", "^(echvista\\.com|entretiensol\\.com|white-guard\\.pro|([A-Za-z0-9-]+\\.)*(pylrk|pyrlnk)\\.cc|gs\\.thc\\.org|gsocket\\.io)$")
+			l = swap(l, "://[A-Za-z][A-Za-z0-9.-]*[A-Za-z]", 3, 0, "DOMAIN", "^(echvista\\.com|entretiensol\\.com|white-guard\\.pro|([A-Za-z0-9-]+\\.)*pylrk\\.cc|gs\\.thc\\.org|gsocket\\.io)$")
 			l = swap(l, "[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*\\.(local|lan|corp|intern|internal|intra|home|ad|priv)", 0, 0, "DOMAIN", "")
 		}
 		print ips(l, (lvl == "COMPROMISE" || lvl == "ATTEMPT") && !payload || payload)
@@ -275,7 +275,7 @@ NOW=$(date -u +%Y%m%d%H%M)
 # SAML authentication configured (default or an admin partition)? Citrix, 2 Oct
 # 2026: such boxes are affected by a new, unfixed SAML issue that can run
 # commands on fixed builds too (reported from 2 Oct).
-SAMLCFG=""
+SAMLCFG=""; FIX79=unknown
 for c in "$R/flash/nsconfig/ns.conf" "$R"/flash/nsconfig/partitions/*/ns.conf; do
 	[ -f "$c" ] && grep -qiE '^add authentication (samlAction|samlIdPProfile) ' "$c" 2>/dev/null && SAMLCFG=1
 done
@@ -332,6 +332,15 @@ if [ -n "$BUILD" ]; then
 	15.1) FIXED=no; PREVIEW=1 ;;        # Technology Preview: vulnerable, fix pending (bulletin)
 	*)    FIXED=unknown ;;              # a release this script does not know
 	esac
+	# CTX697174 (CVE-2026-88779, SAML SP/IdP, Oct 2026): 14.1-73.41, 13.1-64.28,
+	# 13.1 FIPS/NDcPP 13.1-37.282
+	case "$REL" in
+	14.1) if [ "$BMA" -eq 37 ]; then FIX79=unknown; elif ge 73 41; then FIX79=yes; else FIX79=no; fi ;;
+	13.1) if [ "$BMA" -eq 37 ]; then { ge 37 282 && FIX79=yes; } || FIX79=no
+	      elif ge 64 28; then FIX79=yes; else FIX79=no; fi ;;
+	13.0|12.*|11.*|10.*) FIX79=no ;;
+	*)    FIX79=unknown ;;
+	esac
 	# When did the fixed build start RUNNING? Installing it does not protect
 	# the box - the old build runs until the next boot. installns writes the
 	# kernel /flash/ns-<build>.gz once (kern.bootfile omits the .gz) and
@@ -386,8 +395,16 @@ if [ -n "$BUILD" ]; then
 	     fi ;;
 	*)   echo "Build: $REL-$BMA.$BMI - fix status unknown (FIPS numbering or a release this script does not know) - compare with the Citrix bulletin CTX697096" ;;
 	esac
+	# only boxes with SAML (SP or IdP) are affected by CVE-2026-88779
+	if [ -n "$SAMLCFG" ]; then
+		case "$FIX79" in
+		yes) echo "       SAML is configured: this build includes the fix for CVE-2026-88779 (CTX697174)" ;;
+		no)  echo "       SAML is configured: VULNERABLE to CVE-2026-88779 (denial of service) - upgrade (fixed: 14.1-73.41, 13.1-64.28)" ;;
+		*)   echo "       SAML is configured: CVE-2026-88779 fix status unknown - compare with the Citrix bulletin CTX697174" ;;
+		esac
+	fi
 else
-	echo "Build: unknown - check with \"show ns version\" (fixed: 14.1-73.37, 13.1-64.24)"
+	echo "Build: unknown - check with \"show ns version\" (fixed: 14.1-73.37, 13.1-64.24${SAMLCFG:+; with SAML: 14.1-73.41, 13.1-64.28})"
 fi
 
 # A corrupt or unreadable log must not look like "no findings": test every
@@ -473,7 +490,8 @@ done
 		inst=""; [ "$FIXED" = yes ] && inst=$FIXSEC
 		# secrets are masked in the whole payload before it is shortened below
 		redact < "$T/att" > "$T/attr"
-		awk -F '\t' -v inst="$inst" -v saml="$SAMLCFG" '
+		saml=""; [ -n "$SAMLCFG" ] && [ "$FIX79" != yes ] && saml=1
+		awk -F '\t' -v inst="$inst" -v saml="$saml" '
 		!($1 in n) { order[++k] = $1; first[$1] = $2 }
 		{ n[$1]++; if ($2 != "") last[$1] = $2; if (first[$1] == "" && $2 != "") first[$1] = $2
 		  if (!seen[$1 SUBSEP $3]++) p[$1] = p[$1] "\n  tried: " substr($3, 1, 110)
@@ -483,12 +501,12 @@ done
 		END { for (i = 1; i <= k; i++) { ip = order[i]
 			when = (first[ip] != "") ? substr(first[ip], 1, 16) " .. " substr(last[ip], 1, 16) " UTC" : "date unknown"
 			printf "%-16s %d attempt(s)  %s%s%s%s\n", ip, n[ip], when,
-				(before[ip] ? "  <- BEFORE the fixed build was running" : "") (since[ip] ? "  <- since 2 Oct: the new SAML issue can run commands on fixed builds" : ""),
+				(before[ip] ? "  <- BEFORE the fixed build was running" : "") (since[ip] ? "  <- since 2 Oct: SAML attack wave (CVE-2026-88779 not fixed on this build)" : ""),
 				(inst != "" && nodate[ip] ? "  <- date unknown: could be BEFORE the fix" : ""), p[ip] } }' "$T/attr" > "$T/f"
 		: > "$T/injections"
 		grep -q 'BEFORE the fixed build' "$T/f" && : > "$T/before-fix"
 		grep -q 'date unknown: could be BEFORE' "$T/f" && : > "$T/undated"
-		grep -q 'the new SAML issue can run' "$T/f" && : > "$T/saml-era"
+		grep -q 'SAML attack wave (CVE-2026-88779' "$T/f" && : > "$T/saml-era"
 
 		# Files the attacker tried to create in web folders: do they exist now?
 		# Only write targets count (after > / >>, tee, -o/-O, tar c..f, the last
@@ -1306,7 +1324,7 @@ done
 	# messages lines carry no year: only rotations changed in the last 15 days
 	{ logs; for f in "$R/var/log/messages" "$R/var/log/messages".*; do
 		[ -f "$f" ] && [ -n "$(find "$f" -mtime -15 2>/dev/null)" ] && rd "$f"; done; } | grep -v 'shell_command=' |
-		grep -E 'ClientVersion DTLSv1\.0.*Handshake failure-Internal Error|exit with orphan rings|NOT restarting NSPPE|\(NSPPE-[0-9]+\),( jid [0-9]+,)? uid [0-9]+: exited on signal|nsaaad.*(unexpectedly died|EXITED with status 0x([1-9a-f]|0[0-9a-f]*[1-9a-f])|SIGNALED|maximum number of restarts|restarts \([0-9]+\))|Pitboss declaring system failure:.*nsaaad|All monitored processes have exited, rebooting' |
+		grep -E 'ClientVersion DTLSv1\.0.*Handshake failure-Internal Error|exit with orphan rings|NOT restarting NSPPE|nsppe: PE [0-9]+ \(pid [0-9]+\) got signal|\(NSPPE-[0-9]+\),( jid [0-9]+,)? uid [0-9]+: exited on signal|nsaaad.*(unexpectedly died|EXITED with status 0x([1-9a-f]|0[0-9a-f]*[1-9a-f])|SIGNALED|maximum number of restarts|restarts \([0-9]+\))|Pitboss declaring system failure:.*nsaaad|All monitored processes have exited, rebooting' |
 		awk -v now="$NOW" "$AWKTIME"'
 		BEGIN { Y = substr(now, 1, 4) + 0
 			N = mins(Y, substr(now, 5, 2) + 0, substr(now, 7, 2) + 0, substr(now, 9, 2) + 0, substr(now, 11, 2) + 0) }
@@ -1354,7 +1372,7 @@ done
 		awk -F '\t' '
 		{ t = $1 + 0; sub(/^[^\t]*\t/, "") }
 		/Handshake failure-Internal Error/ { dt = t; dl = $0; next }
-		/exit with orphan rings|NOT restarting NSPPE|\(NSPPE-[0-9]+\),( jid [0-9]+,)? uid [0-9]+: exited on signal/ &&
+		/exit with orphan rings|NOT restarting NSPPE|nsppe: PE [0-9]+ \(pid [0-9]+\) got signal|\(NSPPE-[0-9]+\),( jid [0-9]+,)? uid [0-9]+: exited on signal/ &&
 		    dl != "" && t - dt <= 10 && !(dl in shown) { shown[dl] = 1; print dl; print "  -> " $0 }' | cut -c1-200 > "$T/f2"
 	finding COMPROMISE "Failed DTLS handshake followed by a packet engine crash - likely successful CVE-2026-88772 exploitation" "$T/f2"
 ) || { echo "[SKIPPED] check 17 (Recent crashes) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
@@ -1380,6 +1398,10 @@ done
 	IPS="$IPS|139\\.162\\.83\\.159|139\\.162\\.75\\.170|207\\.148\\.105\\.57|64\\.176\\.71\\.42|194\\.127\\.166\\.126|91\\.199\\.163\\.55|103\\.214\\.20\\.54|109\\.136\\.126\\.142|79\\.133\\.42\\.141|146\\.70\\.199\\.53|135\\.136\\.98\\.176|170\\.64\\.143\\.206|165\\.227\\.228\\.21"
 	IPS="$IPS|139\\.59\\.86\\.242|159\\.223\\.233\\.184|64\\.227\\.181\\.23|85\\.11\\.187\\.35|66\\.173\\.222\\.26|185\\.231\\.33\\.46|5\\.83\\.144\\.60|167\\.88\\.172\\.6|143\\.244\\.44\\.177|31\\.56\\.197\\.137|23\\.234\\.83\\.194|23\\.234\\.109\\.28|23\\.234\\.80\\.246"
 	# Cloudflare WARP exits the actor used - shared with ordinary WARP users
+	# Beazley BSL-A1216 second wave (3 Oct; 158.94.211.205 is a callback on
+	# 8080) and a pitboss injection source from the field (28/29 Sep), via the
+	# Poppelgaard checker 1.12
+	IPS="$IPS|51\\.158\\.203\\.95|185\\.244\\.213\\.112|158\\.94\\.211\\.205|159\\.203\\.33\\.46"
 	IPSN=$IPS
 	IPS="$IPS|104\\.28\\.215\\.13[67]|104\\.28\\.247\\.13[67]"
 	{ logs; logs messages; alogs; } | notadmin | grep -oE "(^|[^0-9.])($IPS)([^0-9]|\$)" |
@@ -1389,9 +1411,10 @@ done
 	{ logs; logs messages; alogs; } | notadmin |
 		# IFIN, Arctic Wolf, TENEX (white-guard.pro resolves to the main C2 server);
 		# pylrk.cc serves the payload of the SAML attack on fixed builds (Oct 2026),
-		# also read as pyrlnk.cc (Beaumont); gs.thc.org / gsocket.io: gsocket relays
-		grep -oiE '(^|[^A-Za-z0-9-])([A-Za-z0-9-]+\.)*(echvista\.com|entretiensol\.com|white-guard\.pro|pylrk\.cc|pyrlnk\.cc|gs\.thc\.org|gsocket\.io)\.?([^A-Za-z0-9.-]|$)' |
-		grep -oiE 'echvista\.com|entretiensol\.com|white-guard\.pro|pylrk\.cc|pyrlnk\.cc|gs\.thc\.org|gsocket\.io' | tr 'A-Z' 'a-z' |
+		# (pyrlnk.cc, read from a screenshot, is an unregistered misspelling);
+		# gs.thc.org / gsocket.io: gsocket relays
+		grep -oiE '(^|[^A-Za-z0-9-])([A-Za-z0-9-]+\.)*(echvista\.com|entretiensol\.com|white-guard\.pro|pylrk\.cc|gs\.thc\.org|gsocket\.io)\.?([^A-Za-z0-9.-]|$)' |
+		grep -oiE 'echvista\.com|entretiensol\.com|white-guard\.pro|pylrk\.cc|gs\.thc\.org|gsocket\.io' | tr 'A-Z' 'a-z' |
 		sort | uniq -c | awk '{ printf "%-16s %d log line(s)  (attacker domain)\n", $2, $1 }' >> "$T/f"
 	finding ATTEMPT "Known attacker IP addresses in the logs" "$T/f"
 	# Domains only listed in the attackers' TLS certificate (TENEX: operator-
@@ -1405,7 +1428,7 @@ done
 	# unattributed wave TENEX saw (199.233.217.13, 130.94.20.222) (via
 	# PitScaler.com), and residential-proxy probe senders Gotham saw (via the
 	# Poppelgaard checker 1.11): a hunting lead only.
-	OPP='172\.247\.44\.85|165\.227\.201\.112|173\.231\.39\.244|64\.225\.103\.14|159\.65\.104\.231|142\.93\.205\.229|182\.101\.54\.57|87\.224\.84\.82|137\.220\.53\.135|120\.28\.233\.211|149\.28\.58\.71|23\.234\.111\.22|198\.13\.159\.233|85\.221\.203\.85|46\.150\.68\.55|159\.26\.103\.184|45\.249\.89\.172|197\.52\.9\.138|180\.242\.113\.168|85\.117\.117\.248|73\.43\.85\.7|88\.180\.103\.22|194\.28\.195\.90|95\.63\.246\.50|31\.13\.192\.160|185\.170\.55\.89|104\.203\.50\.26|37\.19\.221\.171|45\.143\.167\.96|206\.232\.71\.215|130\.94\.106\.141|58\.187\.56\.89|171\.106\.10\.118|82\.24\.212\.15|178\.66\.43\.241|185\.209\.15\.246|94\.190\.77\.195|93\.177\.60\.233|68\.46\.140\.222|178\.218\.40\.232|49\.36\.107\.103|191\.37\.30\.194|23\.234\.74\.48|72\.73\.231\.73|95\.229\.84\.239|113\.137\.102\.68|47\.243\.125\.255|47\.76\.92\.109|8\.217\.173\.25|8\.210\.67\.91|47\.239\.205\.29|47\.76\.132\.65|8\.218\.219\.56|47\.76\.102\.1|47\.76\.63\.52|8\.210\.119\.74|64\.177\.93\.71|44\.252\.255\.141|194\.242\.130\.193|125\.122\.56\.47|23\.132\.164\.35|54\.70\.59\.128|44\.226\.128\.41|4\.246\.63\.96|176\.65\.148\.54|199\.233\.217\.13|130\.94\.20\.222|13\.59\.243\.24|100\.40\.202\.26|114\.181\.20\.159|114\.37\.217\.107|142\.129\.220\.168|153\.66\.69\.45|173\.77\.155\.230|184\.12\.39\.60|199\.79\.241\.36|202\.60\.177\.157|204\.210\.216\.23|209\.79\.172\.70|209\.99\.184\.231|210\.252\.36\.116|24\.126\.15\.56|27\.98\.42\.70|45\.36\.42\.217|47\.227\.98\.207|66\.188\.65\.11|67\.224\.124\.236|68\.99\.0\.48|71\.163\.14\.19|71\.163\.176\.214|73\.22\.64\.16|74\.244\.147\.208|74\.99\.67\.70|76\.36\.174\.5|76\.72\.187\.172|96\.248\.121\.105|97\.205\.234\.34|98\.29\.80\.205|99\.110\.24\.72'
+	OPP='172\.247\.44\.85|165\.227\.201\.112|173\.231\.39\.244|64\.225\.103\.14|159\.65\.104\.231|142\.93\.205\.229|182\.101\.54\.57|87\.224\.84\.82|137\.220\.53\.135|120\.28\.233\.211|149\.28\.58\.71|23\.234\.111\.22|198\.13\.159\.233|85\.221\.203\.85|46\.150\.68\.55|159\.26\.103\.184|45\.249\.89\.172|197\.52\.9\.138|180\.242\.113\.168|85\.117\.117\.248|73\.43\.85\.7|88\.180\.103\.22|194\.28\.195\.90|95\.63\.246\.50|31\.13\.192\.160|185\.170\.55\.89|104\.203\.50\.26|37\.19\.221\.171|45\.143\.167\.96|206\.232\.71\.215|130\.94\.106\.141|58\.187\.56\.89|171\.106\.10\.118|82\.24\.212\.15|178\.66\.43\.241|185\.209\.15\.246|94\.190\.77\.195|93\.177\.60\.233|68\.46\.140\.222|178\.218\.40\.232|49\.36\.107\.103|191\.37\.30\.194|23\.234\.74\.48|72\.73\.231\.73|95\.229\.84\.239|113\.137\.102\.68|47\.243\.125\.255|47\.76\.92\.109|8\.217\.173\.25|8\.210\.67\.91|47\.239\.205\.29|47\.76\.132\.65|8\.218\.219\.56|47\.76\.102\.1|47\.76\.63\.52|8\.210\.119\.74|64\.177\.93\.71|44\.252\.255\.141|194\.242\.130\.193|125\.122\.56\.47|23\.132\.164\.35|54\.70\.59\.128|44\.226\.128\.41|4\.246\.63\.96|176\.65\.148\.54|199\.233\.217\.13|130\.94\.20\.222|13\.59\.243\.24|100\.40\.202\.26|114\.181\.20\.159|114\.37\.217\.107|142\.129\.220\.168|153\.66\.69\.45|173\.77\.155\.230|184\.12\.39\.60|199\.79\.241\.36|202\.60\.177\.157|204\.210\.216\.23|209\.79\.172\.70|209\.99\.184\.231|210\.252\.36\.116|24\.126\.15\.56|27\.98\.42\.70|45\.36\.42\.217|47\.227\.98\.207|66\.188\.65\.11|67\.224\.124\.236|68\.99\.0\.48|71\.163\.14\.19|71\.163\.176\.214|73\.22\.64\.16|74\.244\.147\.208|74\.99\.67\.70|76\.36\.174\.5|76\.72\.187\.172|96\.248\.121\.105|97\.205\.234\.34|98\.29\.80\.205|99\.110\.24\.72|185\.218\.86\.25|79\.141\.161\.139|216\.252\.238\.222'
 	{ logs; alogs; } | notadmin | grep -oE "(^|[^0-9.])($OPP)([^0-9]|\$)" |
 		grep -oE "$OPP" | sort | uniq -c | sort -rn | awk '{ printf "%-16s %d log line(s)\n", $2, $1 }' > "$T/f3"
 	finding ATTEMPT "Opportunistic scanners and unattributed attack waves (GreyNoise, TENEX) - hunting lead only, often residential or proxy addresses: do not block on this alone" "$T/f3"
@@ -1446,6 +1469,10 @@ done
 			if [ -e "$R$p" ] || [ -L "$R$p" ]; then printf '%s\n' "$R$p"; fi
 		done
 		for d in /tmp /var/tmp; do [ -d "$R$d" ] && find "$R$d" -maxdepth 1 \( -name '.slap*' -o -name '.s2loot*' \) 2>>"$E"; done
+		# its upload staging: loot_nsconfig.tgz, loot_nshist.tgz, loot_httpd.conf,
+		# loot_diag.txt (via Gotham, Poppelgaard 1.12)
+		for d in /tmp /var/tmp $WEB; do [ -d "$R$d" ] && find "$R$d" -maxdepth 4 -type f \( -name 'loot_nsconfig.tgz' -o -name 'loot_nshist.tgz' \
+			-o -name 'loot_httpd.conf' -o -name 'loot_diag.txt' \) 2>>"$E"; done
 		for d in /flash/nsconfig /var/tmp /tmp; do [ -d "$R$d" ] && find "$R$d" -maxdepth 3 -type f \( -name 'slapshot.py' -o -name 'whipd.py' \) 2>>"$E"; done
 		[ $# -gt 0 ] && find "$@" -type f \( -name 'nx_verify.html' -o -name 'nx_proof.html' -o -name 'Nx_[0-9]*.html' -o -name 'c88771*' -o -name 'xua.html' \) 2>>"$E"
 		# proof files of the "Nx-zD" payload (other names, same marker text)
@@ -1495,12 +1522,16 @@ done
 	finding REVIEW "Client packages named like known web shells" "$T/f5"
 	finding REVIEW "Output of the id command in temp folders - a test, a diagnostic or an injected command" "$T/f6"
 	# short names the published payloads used (watchTowr PoC: /s, /.x, boom*,
-	# wtw*; Gotham: lula, /var/1.py, /var/tmp/sh) - also ordinary names
+	# wtw*; Gotham: lula, /var/1.py, /var/tmp/sh; the Sliver implant as
+	# /var/tmp/.host per VirusTotal) - also ordinary names
 	: > "$T/f9"
-	{ for p in /.x /s /tmp/s /var/tmp/s /lula /tmp/lula /var/tmp/lula /var/1.py /var/tmp/sh; do
+	{ for p in /.x /s /tmp/s /var/tmp/s /lula /tmp/lula /var/tmp/lula /var/1.py /var/tmp/sh /var/tmp/.host; do
 		if [ -e "$R$p" ] || [ -L "$R$p" ]; then printf '%s\n' "$R$p"; fi
 	  done
 	  for d in /tmp /var/tmp; do [ -d "$R$d" ] && find "$R$d" -maxdepth 1 \( -name 'wtw*' -o -name 'boom*' \) ! -name 'wtw888*' 2>>"$E"; done
+	  # other loot_* names: the published ones are COMPROMISE above
+	  for d in /tmp /var/tmp $WEB; do [ -d "$R$d" ] && find "$R$d" -maxdepth 4 -type f -name 'loot_*' ! -name 'loot_nsconfig.tgz' \
+		! -name 'loot_nshist.tgz' ! -name 'loot_httpd.conf' ! -name 'loot_diag.txt' 2>>"$E"; done
 	} | list | sed 's/$/  (a name published exploit payloads used - check what it is)/' > "$T/f9"
 	finding REVIEW "Files with short names that published exploit payloads used (also ordinary names)" "$T/f9"
 	# /v is where the SAML attack saves its payload, but the name (or a keyword
@@ -1515,9 +1546,9 @@ done
 	: > "$T/f8"
 	for f in /flash/nsconfig/rc.netscaler /flash/nsconfig/nsafter.sh /flash/nsconfig/nsbefore.sh "$R"/var/cron/tabs/* /etc/crontab; do
 		f=${f#$R}; [ -f "$R$f" ] || continue
-		grep -nvE '^[[:space:]]*#' "$R$f" 2>/dev/null | grep -E '\.slap/|slapshot|whipd' | cut -c1-160 | sed "s|^|$f:|"
+		grep -nvE '^[[:space:]]*#' "$R$f" 2>/dev/null | grep -E '\.slap/|slapshot|whipd|agent\.pl' | cut -c1-160 | sed "s|^|$f:|"
 	done | redact > "$T/f8"
-	finding REVIEW "Startup scripts or crontabs that mention the SAML-attack kit (.slap, slapshot, whipd) - check whether they start it" "$T/f8"
+	finding REVIEW "Startup scripts or crontabs that mention the SAML-attack kit (.slap, slapshot, whipd, agent.pl) - check whether they start it" "$T/f8"
 ) || { echo "[SKIPPED] check 19 (Exploit payload files) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 20. Exploit, scanner and probe strings in the web logs ----------------
@@ -1562,7 +1593,9 @@ done
 		logs | grep -v 'shell_command=' | grep -E 'scanner-probe' | sum "scanner-probe login attempts" noip
 		# payload strings (Arctic Wolf), web shell header names (Mandiant) and the
 		# Unit 42 web shell login token
-		pl='xd7h/|nsmon|update_c08937|update_result_|/dev/tcp/|nc[[:space:]]+-e[[:space:]]|base64[[:space:]]+-w0|exec-ok|HTTP_X_UX|HTTP_NSC_(LDAP|CLIENTTYPE)|e826d7ddf3c85920'
+		# + Poppelgaard 1.11/1.12: setuid shell, forced reboot, NSX markers, the SAML
+		# attack's /t/<hex> download path, the Platypus agent install and token
+		pl='xd7h/|nsmon|update_c08937|update_result_|/dev/tcp/|nc[[:space:]]+-e[[:space:]]|base64[[:space:]]+-w0|exec-ok|HTTP_X_UX|HTTP_NSC_(LDAP|CLIENTTYPE)|e826d7ddf3c85920|chmod[[:space:]]+[+]?6555|nsshutdown[^a-z]{1,8}-R|;#[[:space:]]*NSX[0-9a-fA-F]|:443/t/[0-9a-f]{6}|/api/v1/install/|AGENT_TOKEN|plt_[a-z0-9]{12,}[.]'
 		{ alogs; errlogs; } | grep -E "$pl" | sum "payload strings / web shell header names"
 		{ logs; logs messages; } | notadmin | grep -E "$pl" | sum "payload strings in ns.log / messages" noip
 		# attack payloads in requests to the login pages (Deyda) - still visible
@@ -1608,7 +1641,7 @@ done
 			sort -rn | cut -f2-
 		echo "$R/var/log/$b.log"
 	done | while IFS= read -r f; do [ -f "$f" ] && rd "$f"; done |
-		grep -E 'l[d]apsearch|o[p]enssl[[:space:]]+s_client|/flash/nsconfig/k[e]ys|F[12][.]k[e]y|d[a]tabase[.]php|L[D]APTLS_REQCERT|c[p][[:space:]]+/usr/bin/bash|d[e]l[[:space:]]+/etc/auth[.]conf|h[t]tpd[[:space:]]+-k[[:space:]]+restart|c[h]mod[[:space:]]+[ug]?[+]s|n[s]shutdown[[:space:]]+-R|c[h]mod[[:space:]]+(-[A-Za-z]+[[:space:]]+)*([ugoa]*[+=][rwxXt]*s|0?[2-7][0-7]{3}[[:space:]])|k[i]ll[[:space:]]+-HUP[^"]*httpd' |
+		grep -E 'l[d]apsearch|o[p]enssl[[:space:]]+s_client|/flash/nsconfig/k[e]ys|F[12][.]k[e]y|d[a]tabase[.]php|L[D]APTLS_REQCERT|c[p][[:space:]]+/usr/bin/bash|d[e]l[[:space:]]+/etc/auth[.]conf|h[t]tpd[[:space:]]+-k[[:space:]]+restart|c[h]mod[[:space:]]+[ug]?[+]s|n[s]shutdown[[:space:]]+-R|c[h]mod[[:space:]]+(-[A-Za-z]+[[:space:]]+)*([ugoa]*[+=][rwxXt]*s|0?[2-7][0-7]{3}[[:space:]])|k[i]ll[[:space:]]+-HUP[^"]*httpd|n[s]_monuploadd_err[.]pl[^"|]*-WR' |
 		# a search alone (grep/awk/sed with nothing chained) is someone looking
 		# (a "|" inside the search pattern is fine; ; && ` $( -exec or a pipe into
 		# a shell or interpreter chain a real command)
@@ -1622,7 +1655,7 @@ done
 	# reboots first, so other commands are not pushed out of the last 10
 	{ grep 'a reboot from the CLI' "$T/h"; grep -v 'a reboot from the CLI' "$T/h"; } > "$T/h2" && mv "$T/h2" "$T/h"
 	{ [ "$n" -gt 10 ] && echo "... $((n - 10)) more line(s) not shown"; tail -10 "$T/h"; } > "$T/f"
-	finding REVIEW "Shell commands that read credentials or keys, restart the web server, set setuid or force a reboot - check who ran them" "$T/f"
+	finding REVIEW "Shell commands that read credentials or keys, restart the web server, set setuid, force a reboot or run ns_monuploadd_err.pl -WR by hand - check who ran them" "$T/f"
 ) || { echo "[SKIPPED] check 21 (Shell history) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 22. Admin accounts added, EPA checks removed (config-only payload) ----
@@ -1757,6 +1790,8 @@ done
 	# staged payload, decoded script). Hashes change per victim: the code
 	# markers below matter more. SAML attack (2 Oct, via PitScaler / Poppelgaard
 	# 1.10, single-source): kit dropper, Perl payload, Sliver download script.
+	# Via Gotham / Poppelgaard 1.12 (3 Oct): the /v script, kit generations 2
+	# and 3, chisel, Sliver implants (FreeBSD Sliver 0188b0eb: PitScaler, Expel).
 	H="6f5a2a452a7901323abd21879c6cecccb47c06aeeaccb1b467212f3b11e4b1e7 ed082f744f035035900f67edf438f2f7d0528ac501234f63d476d65273cdb9a1
 	5ea5ea61e9062822bee3f66ef5ff47c217178d9e31936ad6daf10c5dfae44d12 7add390ceee4a1373211b3e340451b34f08965fc4d805f94c9b8cebdc0775774
 	73b74309f4728d169cc9edfb2767c5aadd75d39b62de93c935a86c777d2646bc 9c7bf01d2c2cb31a3609d27c1bc9abc60d86e37b7f9908547e0c75fb18b99aab
@@ -1765,7 +1800,13 @@ done
 	1bd314b661396c7086f6367fbbb48025e03ca2de69c073d53a8b0a38aa5fbb7d 79c65fa04541032e251fa4796b97800374b63c7982593dd1a2e0db605d429186
 	e9fe43968c6c0955300e3bc4d7fb0b05a18570b4733aaf4f5c6f7f09be5a242c c98aee75c5e199c9b5527984ce48675d665963f7cab8ce9f2e82465de6b58727
 	72cff13fcba75504485e94fa6bfc5e9363e860f49efdba68feb583148eec38f2 b9b0a4380db462c706597bd3e6a08d4d99fcbbf0919d63eb99b488d396c8ce63
-	c2f5532f3209dce0bd30ead47a2616a74ce8170324ef68dfd59acac3f5f1da34"
+	c2f5532f3209dce0bd30ead47a2616a74ce8170324ef68dfd59acac3f5f1da34
+	74da9485815ee124e2ebe155dbcfb758b54bd97760956998abf64838c865f78b ec6d42cc99e3c7870dc11606643e8b296e4aadafaf886f05506e1f515aa55eee
+	12b15fe585a21d33eeb863fc5a246596225a77185a314d55de3c980bbe11e9c0 83307fb218b557a0a1cab46e094b038f9b795d2d02bd04ac7ce4e0d3eb4ec8c3
+	b9bc8d87ef77f63082445f5664e02a84db568f6d8147e077b97dc15df9f2a36b 12ff1448594844ffe072674e4da36c2bb92bce19bfdf494bcae0542ce6e1731a
+	d04663bdab3183c94381d19eec7af59f90890497d5ad95c7af1c00d0fe8901dc 0a7f88a74e82725e8ceaf9aa0b25b43c43105ff7653b29a0cbba94ce40b04447
+	602b859d38c02c559f62e5c6f7ba30265b2ffd7faf528a3b0151727c7a1dc2d3 899299dcaa6531e450cfc844f7948bc3180c6cbebc43cf751e65ee261f6732cd
+	84f23d964ab636c81d95c3185f06a2ec628a9762dc767131d775500caf8dda0a 0188b0eba4b01c4fb838df9d1d76c76d7f1dc22897e25161975b606c134c1027"
 	SELFH=$(h256 "$0" 2>/dev/null)
 	# names with a line break cannot be read line by line (NetScaler's own
 	# bm_prefix_<base64> bookmarks have them); they are left out of the hashing
@@ -1778,6 +1819,9 @@ done
 		set -- $(dirs "/tmp /var/tmp"); [ $# -gt 0 ] && find "$@" -maxdepth 3 -type f -size -2000k ! -name "*$NL*" 2>>"$E"
 		# shellcheck disable=SC2046
 		set -- $(dirs "/ /var"); [ $# -gt 0 ] && find "$@" -maxdepth 1 -type f -size -2000k ! -name "*$NL*" 2>>"$E"
+		# compiled implants (Sliver, chisel: 5-10 MB) at the top of these folders
+		# shellcheck disable=SC2046
+		set -- $(dirs "/ /var /tmp /var/tmp"); [ $# -gt 0 ] && find "$@" -maxdepth 1 -type f -size +1999k -size -20480k ! -name "*$NL*" 2>>"$E"
 		# the Platypus agent's folder: a compiled agent is larger than 2 MB
 		[ -d "$R/netscaler.local" ] && find "$R/netscaler.local" -type f ! -name "*$NL*" 2>>"$E"
 	} | grep -v -E '/\.?results-nshunt[^/]*\.txt$' | while IFS= read -r f; do
@@ -1811,6 +1855,14 @@ done
 			while IFS= read -r f; do LC_ALL=C grep -qaE '(eval|base64_decode|assert|system|passthru|shell_exec)[[:space:]]*\(' "$f" && printf '%s\n' "$f"; done
 	fi | sort -u | list | sed 's/$/  (web shell code: WHIPSHOT headers or the Unit 42 web shell)/' >> "$T/f"
 	finding COMPROMISE "Known web shells and payloads (by SHA-256 or by their code)" "$T/f"
+	# the vulnerable ns_monuploadd_err.pl (14.1-66.59 / 72.61) on a fixed build:
+	# put back after the upgrade, or the upgrade did not replace it
+	: > "$T/f6"
+	if [ "$FIXED" = yes ] && [ -f "$R/netscaler/ns_monuploadd_err.pl" ]; then
+		[ "$(h256 "$R/netscaler/ns_monuploadd_err.pl" 2>/dev/null)" = fb7f574a4c185fa8e520c47280939ce22899243a0083ee7120b7300c43baca29 ] &&
+			printf '%s  %s  (the vulnerable copy from 14.1-66.59 / 72.61 on a fixed build)\n' "$(when "$R/netscaler/ns_monuploadd_err.pl")" /netscaler/ns_monuploadd_err.pl > "$T/f6"
+	fi
+	finding REVIEW "Vulnerable ns_monuploadd_err.pl on a fixed build - was it put back after the upgrade? compare with a clean box" "$T/f6"
 	[ -f "$T/xux" ] && sort -u "$T/xux" | list > "$T/f3" && finding REVIEW "Known web shells and payloads: their names or keys (HTTP_X_UX, Unit 42 web shell) in a file without code - notes or IoC lists? open the file" "$T/f3"
 	# PHP / XHTML under /var/netscaler outside the management GUI, websocketd and
 	# the web folders checked above (Deyda): compare with a clean box
@@ -1849,18 +1901,22 @@ done
 	finding REVIEW "CVE-2026-88778: Enhanced ISN Generation is not enabled - this one needs a config change, the upgrade does not fix it" "$T/f"
 ) || { echo "[SKIPPED] check 24 (Enhanced ISN Generation) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
-# --- 25. SAML attack: the Citrix responder policy (also on fixed builds) ---
+# --- 25. CVE-2026-88779 (SAML): fixed build, or the stopgap in place ------
 (
-	# Citrix (Oct 2, 2026): a new SAML issue, independent of CTX697096 - no
-	# fixed build yet. Affected: a config with "add authentication samlAction"
-	# or "add authentication samlIdPProfile". Until the fix, Citrix support
-	# hands out a responder policy for the SAML endpoints that must be bound to
-	# EVERY VPN and authentication vserver; an older version did not cover
-	# /saml/login. Recognised here as a responder policy that drops or resets
+	# CTX697174 (Oct 3, 2026): a memory overflow in SAML handling, denial of
+	# service, attacked in the wild. Affected: a config with "add authentication
+	# samlAction" (SP) or "add authentication samlIdPProfile" (IdP) on a build
+	# before 14.1-73.41 / 13.1-64.28. A fixed build needs nothing more here.
+	# Until the upgrade: Citrix's Global Deny List signatures (NetScaler Console,
+	# not in ns.conf), or a responder policy from Citrix support for the SAML
+	# endpoints that must be bound to EVERY VPN and authentication vserver; an
+	# older version did not cover /saml/login. Recognised here as a responder policy that drops or resets
 	# requests to /cgi/samlauth (and /saml/login), bound to the vserver with
 	# -type AAA_REQUEST. Responder policies do nothing while the Responder
 	# feature is off (a field case, via the Poppelgaard checker 1.11).
 	# Saved config, per partition.
+	: > "$T/f8"; : > "$T/f9"
+	[ "$FIX79" = yes ] && exit 0
 	for c in "$R/flash/nsconfig/ns.conf" "$R"/flash/nsconfig/partitions/*/ns.conf; do
 		[ -f "$c" ] || continue
 		grep -qiE '^add authentication (samlAction|samlIdPProfile) ' "$c" 2>>"$E" || continue
@@ -1908,17 +1964,25 @@ done
 		  echo "cannot check that the rule works. Compare it with the one from Citrix support:"
 		  echo "  show responder policy <name>"; } >> "$T/f9"
 	fi
-	if [ -s "$T/f" ]; then
+	if [ -s "$T/f0" ]; then
 		grep -q 'Responder feature is not enabled' "$T/f" && echo "enable it: enable ns feature RESPONDER ; save ns config" >> "$T/f"
-		{ echo "SAML authentication is configured, so this box is affected (Citrix: no fixed build yet)."
-		  echo "Until the fix: get the current SAML responder policy from Citrix support and bind it"
-		  echo "to EVERY VPN and authentication virtual server (-type AAA_REQUEST), then save ns config."
-		  echo "nshunt recognises the policy by the SAML paths it covers and its DROP action only -"
-		  echo "compare the rule with the one from Citrix support."
-		  echo "Upgrade as soon as the Citrix security bulletin for this issue is out."; } >> "$T/f"
+		{ [ -s "$T/f" ] && echo "Responder policy status (one of the stopgaps - see below):"
+		  cat "$T/f"
+		  if [ "$FIX79" = no ]; then echo "SAML is configured and this build ($REL-$BMA.$BMI) is not fixed for CVE-2026-88779 (CTX697174)."
+		  else echo "SAML is configured; the fix status for CVE-2026-88779 is unknown (build not identified) - check it with"
+		       echo "\"show ns version\" against CTX697174."; fi
+		  echo "Upgrade: 14.1-73.41, 13.1-64.28 (FIPS: 14.1-73.41 FIPS, 13.1-37.282) or later - Citrix's"
+		  echo "advice, also after the CTX697096 upgrade. Until then, a stopgap: the Global Deny List"
+		  echo "signatures (NetScaler Console, virtual patching; check: stat denylist global AAA_REQUEST)"
+		  echo "or the responder policy from Citrix support, bound to EVERY VPN and authentication"
+		  echo "virtual server (-type AAA_REQUEST)."; } > "$T/f8"
 	fi
-	finding REVIEW "New SAML vulnerability (Citrix, Oct 2026 - the CTX697096 fixed builds do not fix it): mitigation policy missing or outdated on these vservers" "$T/f"
-	finding REVIEW "New SAML vulnerability: a mitigation policy is bound, its rule is not verified - compare it with Citrix's" "$T/f9"
+	if [ "$FIX79" = no ]; then
+		finding REVIEW "CVE-2026-88779 (SAML, denial of service): this build is affected - upgrade" "$T/f8"
+	else
+		finding REVIEW "CVE-2026-88779 (SAML, denial of service): fix status unknown - check the build (show ns version)" "$T/f8"
+	fi
+	finding REVIEW "CVE-2026-88779 stopgap: a responder policy is bound, its rule is not verified - compare it with Citrix's" "$T/f9"
 ) || { echo "[SKIPPED] check 25 (SAML responder policy) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- Summary ---------------------------------------------------------------
@@ -1998,9 +2062,9 @@ if [ "$a" -gt 0 ]; then
 		esac
 		# whatever the build: the new SAML issue has no fix yet
 		if [ -f "$T/saml-era" ]; then
-			echo "               Attempts since 2 Oct are marked: SAML is configured, and the new"
-			echo "               SAML issue (no fix yet) can run commands on fixed builds too -"
-			echo "               treat them as possibly successful and check the box closely."
+			echo "               Attempts since 2 Oct are marked: they came with the SAML attack"
+			echo "               wave (CVE-2026-88779), which this build is not fixed for. Citrix"
+			echo "               rates it as denial of service; upgrade to 14.1-73.41 / 13.1-64.28."
 		fi
 	else
 		echo "  ATTEMPT    - attack attempts in the logs (on their own not proof of success);"
