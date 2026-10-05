@@ -79,7 +79,7 @@ section that explains the result in plain words.
 Example:
 
 ```
-NetScaler quick hunt 2.3 - ns01 - 2026-09-30 14:43
+NetScaler quick hunt 2.4 - ns01 - 2026-09-30 14:43
 Build: 14.1-73.37 - includes the fix for CVE-2026-88771/88772
        fixed build running since 2026-09-28 11:55 UTC (first boot after the install; installed 2026-09-28 11:48 UTC)
 
@@ -161,7 +161,9 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
 5. **Files written by the web server** - files owned by `nobody` in
    `/var/netscaler/logon`, `/var/netscaler/gui` and `/netscaler/ns_gui`.
 6. **Hidden files, folders and links** in web folders (`REVIEW`). The published
-   web shell names `.ctxs.receiver`, `.slap.receiver` and `.local_journal`, and
+   web shell names - any `*.receiver` file (`.ctxs.receiver`, `.slap.receiver`
+   and randomly named copies; stock has only folders called `receiver`) and
+   `.local_journal` - and
    hidden links into the config, log or system folders are `COMPROMISE`.
 7. **Credential stealers in the login page** - JavaScript that contains an
    external URL next to code that captures or sends data (`password`, `fetch(`,
@@ -271,7 +273,7 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     exploitation.
 18. **Known attacker IP addresses** published by Mandiant, GreyNoise, Lupovis,
     Gotham Technology Group, Unit 42, PitScaler.com, Arctic Wolf, SpiderLabs,
-    Rapid7, TENEX, Sygnia and Beazley, and the domains `echvista.com`, `entretiensol.com`,
+    Rapid7, TENEX, Sygnia, Beazley and Huntback.io, and the domains `echvista.com`, `entretiensol.com`,
     `white-guard.pro`, `pylrk.cc` (SAML attack payload server),
     `gs.thc.org` and `gsocket.io`, in `ns.log*`, `/var/log/messages*` and the web access
     logs, and in current connections (from the box out: `COMPROMISE`; to a
@@ -279,8 +281,9 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     are marked, because ordinary WARP users share them, and never count as a
     live connection. Commands an admin ran (shell history, CLI commands from an
     admin PC) are not counted. About 100 opportunistic
-    scanners and residential-proxy probe senders (GreyNoise, Gotham) and an
-    unattributed wave (TENEX) are listed separately
+    scanners and residential-proxy probe senders (GreyNoise, Gotham), the
+    138.199.60.0/24 range the SAML attack came from, and an unattributed wave
+    (TENEX) are listed separately
     as a hunting lead only, and so are five domains that only appear in the
     attackers' certificate (`REVIEW`, moderate confidence).
 19. **Files written by the published exploit payloads** - known dropped file
@@ -291,7 +294,8 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     (`/nsconfig/.slap/`, `/var/tmp/.ux/`, `slapshot.py`, `whipd.py`, `.slap*` /
     `.s2loot*` files in `/tmp` and `/var/tmp`, `httpd.conf.slap.bak`, its upload
     staging `loot_nsconfig.tgz`, `loot_nshist.tgz`, `loot_httpd.conf`,
-    `loot_diag.txt`). Short names the payloads also used (`/s`, `/.x`, `lula`,
+    `loot_diag.txt`), and `citrix3.bad`, the name the Sliver implant was saved
+    under. Short names the payloads also used (`/s`, `/.x`, `lula`,
     `/var/1.py`, `/var/tmp/sh`, `/var/tmp/.host`, `boom*`, `wtw*`, other `loot_*`
     files) and the SAML attack's payload name `/v` are ordinary names
     too: `REVIEW` (a known hash is `COMPROMISE` in check 23). Small files in the web
@@ -307,8 +311,9 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     and scanner strings (`ns-88771-poc`, `PoCbit`, `NX-CVE-OK`, `Nx-zD`,
     `httpworkbench`, out-of-band test services such as `oast.fun`, `dnsl.cc`,
     `webhook.site`, `dnshook.site`, the `Team-NetScaler-Inventory` User-Agent,
-    requests for `/nsconmsg`), requests for the `.ctxs.receiver` /
-    `.slap.receiver` web shells and their `receiver(.v2).min.css` aliases, 1-byte `nsepa.deb` probes,
+    requests for `/nsconmsg`), requests for `*.receiver` web shells and their
+    `receiver(.v2).min.css` aliases, CVE-2026-88779 probes (User-Agent `probe/1`
+    or very long requests to `/saml/login` / `/cgi/samlauth`, a hunting lead), 1-byte `nsepa.deb` probes,
     `vp_probe_nonexist`, `scanner-probe` logins, requests for
     `/logon/LogonPoint/Authentication/GetUserName`, version fingerprinting
     (`rdx_en.json.gz`, the admin GUI's `ui.css` requested on the Gateway), and

@@ -18,7 +18,7 @@ grep -q "$(printf '\r')" "$0" && printf '%s\n' "ERROR: $0 has Windows line endin
 # logs or a check that crashed) or the report could not be saved - never
 # trust "no findings" with exit 2.
 
-VERSION=2.3
+VERSION=2.4
 
 # anonymise <host>: stdin report -> copy that can leave the organisation.
 # Masks the host name, internal IPs and the box's own addresses, public IPs
@@ -704,7 +704,7 @@ done
 		# admin GUI .htaccess); a hidden link into the config folder serves the
 		# config or keys over the web
 		find "$@" -name '.*' ! -name . \( -type f -o -type d -o -type l \) ! -path '*/admin_ui/*' \
-			! -name '.ctxs.receiver' ! -name '.slap.receiver' ! -name '.local_journal' 2>>"$E" | while IFS= read -r f; do
+			! -name '*.receiver' ! -name '*.receiver.*' ! -name '.local_journal' 2>>"$E" | while IFS= read -r f; do
 			if [ -L "$f" ]; then
 				t=$(ls -ld "$f" 2>/dev/null | sed 's/.* -> //')
 				case "$t" in */nsconfig*|*/flash/*|*/etc/*|*/var/log*) printf '%s\n' "$f" >&3 ;; esac
@@ -713,11 +713,12 @@ done
 			else printf '%s  %s\n' "$(when "$f")" "$(shown "${f#$R}")"; fi
 		done 3>"$T/hl" | sort > "$T/f"
 		# published web shell names (GreyNoise; SpiderLabs: LogonPoint/.local_journal;
-		# Poppelgaard checker 1.10: .slap.receiver of the SAML-attack kit)
-		find "$@" \( -name '.ctxs.receiver' -o -name '.slap.receiver' -o -name '.local_journal' \) 2>>"$E" | list > "$T/f2"
+		# Poppelgaard checker 1.10: .slap.receiver of the SAML-attack kit; Huntback.io:
+		# randomly named *.receiver copies - stock has only folders named "receiver")
+		find "$@" -type f \( -name '*.receiver' -o -name '*.receiver.*' -o -name '.local_journal' \) 2>>"$E" | list > "$T/f2"
 	fi
 	[ -s "$T/hl" ] && list < "$T/hl" | sed 's/$/  (hidden link into the config, logs or system folders)/' >> "$T/f2"
-	finding COMPROMISE "Known web shell files (.ctxs.receiver, .slap.receiver, .local_journal - 2026 attacks) or hidden links into the config" "$T/f2"
+	finding COMPROMISE "Known web shell files (*.receiver such as .ctxs.receiver, .slap.receiver; .local_journal - 2026 attacks) or hidden links into the config" "$T/f2"
 	finding REVIEW "Hidden files in web folders" "$T/f"
 ) || { echo "[SKIPPED] check 6 (Hidden files in web folders) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
@@ -1402,6 +1403,10 @@ done
 	# 8080) and a pitboss injection source from the field (28/29 Sep), via the
 	# Poppelgaard checker 1.12
 	IPS="$IPS|51\\.158\\.203\\.95|185\\.244\\.213\\.112|158\\.94\\.211\\.205|159\\.203\\.33\\.46"
+	# CVE-2026-88771 injection checks against decoys (Huntback.io, 4 Oct) and
+	# CVE-2026-88779 crash payloads (138.199.60.5, Gotham, 5 Oct), via the
+	# Poppelgaard checker 1.13
+	IPS="$IPS|138\\.199\\.60\\.5|138\\.199\\.60\\.22|138\\.199\\.60\\.36|146\\.70\\.199\\.170|146\\.70\\.211\\.157|23\\.162\\.8\\.173"
 	IPSN=$IPS
 	IPS="$IPS|104\\.28\\.215\\.13[67]|104\\.28\\.247\\.13[67]"
 	{ logs; logs messages; alogs; } | notadmin | grep -oE "(^|[^0-9.])($IPS)([^0-9]|\$)" |
@@ -1428,9 +1433,11 @@ done
 	# unattributed wave TENEX saw (199.233.217.13, 130.94.20.222) (via
 	# PitScaler.com), and residential-proxy probe senders Gotham saw (via the
 	# Poppelgaard checker 1.11): a hunting lead only.
-	OPP='172\.247\.44\.85|165\.227\.201\.112|173\.231\.39\.244|64\.225\.103\.14|159\.65\.104\.231|142\.93\.205\.229|182\.101\.54\.57|87\.224\.84\.82|137\.220\.53\.135|120\.28\.233\.211|149\.28\.58\.71|23\.234\.111\.22|198\.13\.159\.233|85\.221\.203\.85|46\.150\.68\.55|159\.26\.103\.184|45\.249\.89\.172|197\.52\.9\.138|180\.242\.113\.168|85\.117\.117\.248|73\.43\.85\.7|88\.180\.103\.22|194\.28\.195\.90|95\.63\.246\.50|31\.13\.192\.160|185\.170\.55\.89|104\.203\.50\.26|37\.19\.221\.171|45\.143\.167\.96|206\.232\.71\.215|130\.94\.106\.141|58\.187\.56\.89|171\.106\.10\.118|82\.24\.212\.15|178\.66\.43\.241|185\.209\.15\.246|94\.190\.77\.195|93\.177\.60\.233|68\.46\.140\.222|178\.218\.40\.232|49\.36\.107\.103|191\.37\.30\.194|23\.234\.74\.48|72\.73\.231\.73|95\.229\.84\.239|113\.137\.102\.68|47\.243\.125\.255|47\.76\.92\.109|8\.217\.173\.25|8\.210\.67\.91|47\.239\.205\.29|47\.76\.132\.65|8\.218\.219\.56|47\.76\.102\.1|47\.76\.63\.52|8\.210\.119\.74|64\.177\.93\.71|44\.252\.255\.141|194\.242\.130\.193|125\.122\.56\.47|23\.132\.164\.35|54\.70\.59\.128|44\.226\.128\.41|4\.246\.63\.96|176\.65\.148\.54|199\.233\.217\.13|130\.94\.20\.222|13\.59\.243\.24|100\.40\.202\.26|114\.181\.20\.159|114\.37\.217\.107|142\.129\.220\.168|153\.66\.69\.45|173\.77\.155\.230|184\.12\.39\.60|199\.79\.241\.36|202\.60\.177\.157|204\.210\.216\.23|209\.79\.172\.70|209\.99\.184\.231|210\.252\.36\.116|24\.126\.15\.56|27\.98\.42\.70|45\.36\.42\.217|47\.227\.98\.207|66\.188\.65\.11|67\.224\.124\.236|68\.99\.0\.48|71\.163\.14\.19|71\.163\.176\.214|73\.22\.64\.16|74\.244\.147\.208|74\.99\.67\.70|76\.36\.174\.5|76\.72\.187\.172|96\.248\.121\.105|97\.205\.234\.34|98\.29\.80\.205|99\.110\.24\.72|185\.218\.86\.25|79\.141\.161\.139|216\.252\.238\.222'
+	OPP='172\.247\.44\.85|165\.227\.201\.112|173\.231\.39\.244|64\.225\.103\.14|159\.65\.104\.231|142\.93\.205\.229|182\.101\.54\.57|87\.224\.84\.82|137\.220\.53\.135|120\.28\.233\.211|149\.28\.58\.71|23\.234\.111\.22|198\.13\.159\.233|85\.221\.203\.85|46\.150\.68\.55|159\.26\.103\.184|45\.249\.89\.172|197\.52\.9\.138|180\.242\.113\.168|85\.117\.117\.248|73\.43\.85\.7|88\.180\.103\.22|194\.28\.195\.90|95\.63\.246\.50|31\.13\.192\.160|185\.170\.55\.89|104\.203\.50\.26|37\.19\.221\.171|45\.143\.167\.96|206\.232\.71\.215|130\.94\.106\.141|58\.187\.56\.89|171\.106\.10\.118|82\.24\.212\.15|178\.66\.43\.241|185\.209\.15\.246|94\.190\.77\.195|93\.177\.60\.233|68\.46\.140\.222|178\.218\.40\.232|49\.36\.107\.103|191\.37\.30\.194|23\.234\.74\.48|72\.73\.231\.73|95\.229\.84\.239|113\.137\.102\.68|47\.243\.125\.255|47\.76\.92\.109|8\.217\.173\.25|8\.210\.67\.91|47\.239\.205\.29|47\.76\.132\.65|8\.218\.219\.56|47\.76\.102\.1|47\.76\.63\.52|8\.210\.119\.74|64\.177\.93\.71|44\.252\.255\.141|194\.242\.130\.193|125\.122\.56\.47|23\.132\.164\.35|54\.70\.59\.128|44\.226\.128\.41|4\.246\.63\.96|176\.65\.148\.54|199\.233\.217\.13|130\.94\.20\.222|13\.59\.243\.24|100\.40\.202\.26|114\.181\.20\.159|114\.37\.217\.107|142\.129\.220\.168|153\.66\.69\.45|173\.77\.155\.230|184\.12\.39\.60|199\.79\.241\.36|202\.60\.177\.157|204\.210\.216\.23|209\.79\.172\.70|209\.99\.184\.231|210\.252\.36\.116|24\.126\.15\.56|27\.98\.42\.70|45\.36\.42\.217|47\.227\.98\.207|66\.188\.65\.11|67\.224\.124\.236|68\.99\.0\.48|71\.163\.14\.19|71\.163\.176\.214|73\.22\.64\.16|74\.244\.147\.208|74\.99\.67\.70|76\.36\.174\.5|76\.72\.187\.172|96\.248\.121\.105|97\.205\.234\.34|98\.29\.80\.205|99\.110\.24\.72|185\.218\.86\.25|79\.141\.161\.139|216\.252\.238\.222|38\.60\.206\.53|38\.60\.212\.144|149\.102\.254\.17|130\.94\.19\.84|138\.199\.60\.[0-9]{1,3}'
 	{ logs; alogs; } | notadmin | grep -oE "(^|[^0-9.])($OPP)([^0-9]|\$)" |
-		grep -oE "$OPP" | sort | uniq -c | sort -rn | awk '{ printf "%-16s %d log line(s)\n", $2, $1 }' > "$T/f3"
+		# (138.199.60.x: the range the SAML attack came from, Gotham; addresses
+		# listed as attackers above are not counted again here)
+		grep -oE "$OPP" | grep -vxE "$IPS" | sort | uniq -c | sort -rn | awk '{ printf "%-16s %d log line(s)\n", $2, $1 }' > "$T/f3"
 	finding ATTEMPT "Opportunistic scanners and unattributed attack waves (GreyNoise, TENEX) - hunting lead only, often residential or proxy addresses: do not block on this alone" "$T/f3"
 	# Live connections (not the shared WARP addresses): from the box out to a
 	# listed IP is COMPROMISE; to a service port of the box (an attack or scan
@@ -1471,6 +1478,8 @@ done
 		for d in /tmp /var/tmp; do [ -d "$R$d" ] && find "$R$d" -maxdepth 1 \( -name '.slap*' -o -name '.s2loot*' \) 2>>"$E"; done
 		# its upload staging: loot_nsconfig.tgz, loot_nshist.tgz, loot_httpd.conf,
 		# loot_diag.txt (via Gotham, Poppelgaard 1.12)
+		# the FreeBSD Sliver implant saved as citrix3.bad (PitScaler, 3 Oct)
+		for d in /tmp /var/tmp /var/core /var/netscaler /flash/nsconfig; do [ -d "$R$d" ] && find "$R$d" -maxdepth 4 -name 'citrix3.bad*' 2>>"$E"; done
 		for d in /tmp /var/tmp $WEB; do [ -d "$R$d" ] && find "$R$d" -maxdepth 4 -type f \( -name 'loot_nsconfig.tgz' -o -name 'loot_nshist.tgz' \
 			-o -name 'loot_httpd.conf' -o -name 'loot_diag.txt' \) 2>>"$E"; done
 		for d in /flash/nsconfig /var/tmp /tmp; do [ -d "$R$d" ] && find "$R$d" -maxdepth 3 -type f \( -name 'slapshot.py' -o -name 'whipd.py' \) 2>>"$E"; done
@@ -1577,7 +1586,11 @@ done
 			if (!noip && lo) printf "    %sfrom 127.0.0.x - the NetScaler itself, this log does not show the real client\n", (k ? "also " : "") }'; }
 	{
 		alogs | grep -E 'httpworkbench|oast\.fun|dnsl\.cc|webhook\.site|dnshook\.site|Team-NetScaler-Inventory|"[A-Z]+ /nsconmsg|NX-CVE-OK|Nx-zD|nx_verify|nx_proof|/Nx_[0-9]+\.html|wtw888|ns-88771-poc|PoCbit' | sum "exploit canary / scanner strings"
-		alogs | grep -E 'LogonPoint/custom/receiver(\.v2)?\.min(\.[0-9a-f]+)?\.css|\.(ctxs|slap)\.receiver' | sum "requests for the .ctxs.receiver / .slap.receiver web shell"
+		alogs | grep -E 'LogonPoint/custom/receiver(\.v2)?\.min(\.[0-9a-f]+)?\.css|\.(ctxs|slap)\.receiver|"[A-Z]+ /[^ "?]*/LogonPoint/[^ "?]*[^/ "?]\.receiver([ ?.])' | sum "requests for *.receiver web shells (.ctxs.receiver, .slap.receiver, random names)"
+		# CVE-2026-88779 probes (Lupovis): User-Agent probe/1, or a very long
+		# request to the SAML endpoints - a hunting lead, not proof
+		alogs | awk '/"probe\/1"/ || (/"(GET|POST|HEAD) \/(saml\/login|cgi\/samlauth)/ && length($0) > 2500)' | cut -c1-400 |
+			sum "SAML probes (User-Agent probe/1 or very long /saml/login, /cgi/samlauth requests - CVE-2026-88779 lead)"
 		alogs | grep -E '/logon/LogonPoint/css/LogonUISimple\.html\.style\.min(\.[0-9a-fA-F]+)?\.css[ ?]' | sum "requests for the .local_journal web shell alias"
 		alogs | grep -E '"[A-Z]+ /logon/insight-new\.js[ ?]' | sum "requests for insight-new.js (stolen config staged here)"
 		{ alogs; logs; } | grep -iE 'platypus-agent|x-protobuf-platypus|/api/v1/agents?/(enroll|link)' | sum "Platypus agent traffic"
