@@ -18,7 +18,7 @@ grep -q "$(printf '\r')" "$0" && printf '%s\n' "ERROR: $0 has Windows line endin
 # logs or a check that crashed) or the report could not be saved - never
 # trust "no findings" with exit 2.
 
-VERSION=2.4
+VERSION=2.5
 
 # anonymise <host>: stdin report -> copy that can leave the organisation.
 # Masks the host name, internal IPs and the box's own addresses, public IPs
@@ -124,7 +124,7 @@ anonymise() {
 		l = swap(l, "-policyName [^ \"]+", 12, 0, "POLICY", "")
 		payload = (l ~ /tried:|decoded |INDEX:|"K:/)
 		if (!payload) {
-			l = swap(l, "://[A-Za-z][A-Za-z0-9.-]*[A-Za-z]", 3, 0, "DOMAIN", "^(echvista\\.com|entretiensol\\.com|white-guard\\.pro|([A-Za-z0-9-]+\\.)*pylrk\\.cc|gs\\.thc\\.org|gsocket\\.io)$")
+			l = swap(l, "://[A-Za-z][A-Za-z0-9.-]*[A-Za-z]", 3, 0, "DOMAIN", "^(echvista\\.com|entretiensol\\.com|white-guard\\.pro|([A-Za-z0-9-]+\\.)*(pylrk\\.cc|ctrxsrv\\.com|v5v\\.in)|gs\\.thc\\.org|gsocket\\.io)$")
 			l = swap(l, "[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*\\.(local|lan|corp|intern|internal|intra|home|ad|priv)", 0, 0, "DOMAIN", "")
 		}
 		print ips(l, (lvl == "COMPROMISE" || lvl == "ATTEMPT") && !payload || payload)
@@ -275,9 +275,10 @@ NOW=$(date -u +%Y%m%d%H%M)
 # SAML authentication configured (default or an admin partition)? Citrix, 2 Oct
 # 2026: such boxes are affected by a new, unfixed SAML issue that can run
 # commands on fixed builds too (reported from 2 Oct).
-SAMLCFG=""; FIX79=unknown
+SAMLCFG=""; SAMLIDP=""; FIX79=unknown; FIX406=unknown; AFF406=""
 for c in "$R/flash/nsconfig/ns.conf" "$R"/flash/nsconfig/partitions/*/ns.conf; do
 	[ -f "$c" ] && grep -qiE '^add authentication (samlAction|samlIdPProfile) ' "$c" 2>/dev/null && SAMLCFG=1
+	[ -f "$c" ] && grep -qiE '^add authentication samlIdPProfile ' "$c" 2>/dev/null && SAMLIDP=1
 done
 
 # alogs: every web access log (httpaccess.log, httpaccess-vpn.log, ...) and rotation, unzipped
@@ -341,6 +342,16 @@ if [ -n "$BUILD" ]; then
 	13.0|12.*|11.*|10.*) FIX79=no ;;
 	*)    FIX79=unknown ;;
 	esac
+	# CTX697191 (CVE-2026-107406, critical, code execution, 8 Oct 2026): fixed in
+	# 14.1-73.46, 13.1-64.29, 13.1 FIPS/NDcPP 13.1-37.283. Affected: a SAML IdP
+	# before the fix; a SAML SP only on builds before the CTX697096 fix.
+	case "$REL" in
+	14.1) if [ "$BMA" -eq 37 ]; then FIX406=unknown; elif ge 73 46; then FIX406=yes; else FIX406=no; fi ;;
+	13.1) if [ "$BMA" -eq 37 ]; then { ge 37 283 && FIX406=yes; } || FIX406=no
+	      elif ge 64 29; then FIX406=yes; else FIX406=no; fi ;;
+	13.0|12.*|11.*|10.*) FIX406=no ;;
+	*)    FIX406=unknown ;;
+	esac
 	# When did the fixed build start RUNNING? Installing it does not protect
 	# the box - the old build runs until the next boot. installns writes the
 	# kernel /flash/ns-<build>.gz once (kern.bootfile omits the .gz) and
@@ -402,9 +413,15 @@ if [ -n "$BUILD" ]; then
 		no)  echo "       SAML is configured: VULNERABLE to CVE-2026-88779 (denial of service) - upgrade (fixed: 14.1-73.41, 13.1-64.28)" ;;
 		*)   echo "       SAML is configured: CVE-2026-88779 fix status unknown - compare with the Citrix bulletin CTX697174" ;;
 		esac
+		# CVE-2026-107406: an IdP until 73.46 / 64.29, an SP only before the CTX697096 fix
+		AFF406=""; [ "$FIX406" = no ] && { [ -n "$SAMLIDP" ] || [ "$FIXED" = no ]; } && AFF406=1
+		if [ "$FIX406" = yes ]; then echo "       SAML: this build includes the fix for CVE-2026-107406 (CTX697191)"
+		elif [ -n "$AFF406" ]; then echo "       SAML${SAMLIDP:+ IdP}: VULNERABLE to CVE-2026-107406 (critical, code execution) - upgrade (fixed: 14.1-73.46, 13.1-64.29)"
+		elif [ "$FIX406" = no ]; then echo "       SAML SP only: not affected by CVE-2026-107406 on this build (CTX697191; IdP would be)"
+		else echo "       SAML is configured: CVE-2026-107406 fix status unknown - compare with the Citrix bulletin CTX697191"; fi
 	fi
 else
-	echo "Build: unknown - check with \"show ns version\" (fixed: 14.1-73.37, 13.1-64.24${SAMLCFG:+; with SAML: 14.1-73.41, 13.1-64.28})"
+	echo "Build: unknown - check with \"show ns version\" (fixed: 14.1-73.37, 13.1-64.24${SAMLCFG:+; with SAML: 14.1-73.46, 13.1-64.29})"
 fi
 
 # A corrupt or unreadable log must not look like "no findings": test every
@@ -597,7 +614,19 @@ done
 				awk 'sub(/^UNK\t/, "")' "$T/req" >> "$T/dlunk"
 			done < "$T/drop"
 		fi
-		cut -f3 "$T/att" | grep -oE 'https?://[^ `;$|"<>'"'"'()]+|(^|[^0-9./])[0-9]{1,3}(\.[0-9]{1,3}){3}:[0-9]+[^ `;$|"<>'"'"'(){]*' |
+		# log reflection (Lupovis): the injection only greps a tagged script from
+		# the access log and pipes it to sh - show the staged script for each tag
+		sed -e 's/\${IFS[^}]*}/ /g' -e 's/\$IFS/ /g' "$T/att" | cut -f3 | grep 'grep.*/var/log/htt' |
+			sed -E 's/.*grep[[:space:]]+//; s/[[:space:]]*\/var\/log\/htt.*//; s/["'"'"'\\{}]//g; s/[[:space:]]//g; s/:$//' |
+			grep -E '^[A-Za-z0-9_-]{2,32}$' | sort -u > "$T/tags"
+		: > "$T/staged"
+		if [ -s "$T/tags" ]; then
+			echo "Payload read from the access log (log reflection) - staged script for each tag:" >> "$T/f"
+			while IFS= read -r tg; do alogs | grep -F "\"$tg:" | sed "s|^|$tg	|"; done < "$T/tags" > "$T/staged"
+			awk -F '\t' 'n[$1]++ < 3 { print "  [" $1 "] " substr($0, length($1) + 2) }' "$T/staged" | redact | cut -c1-300 >> "$T/f"
+		fi
+		# download / callback addresses in the payloads, also in staged scripts
+		{ cut -f3 "$T/att"; cut -f2- "$T/staged"; } | grep -oE 'https?://[^ `;$|"<>'"'"'()]+|(^|[^0-9./])[0-9]{1,3}(\.[0-9]{1,3}){3}:[0-9]+[^ `;$|"<>'"'"'(){]*' |
 			sed 's|^[^0-9h]||' | sort -u > "$T/url"
 		if [ -s "$T/url" ]; then
 			echo "Check firewall logs for connections from the NetScaler to:" >> "$T/f"
@@ -986,6 +1015,9 @@ done
 				sect = l; head = $0; sub(/^[ \t]+/, "", head); stk[++dep] = sect; hst[dep] = head }
 			l ~ /^[ \t]*<\/(files|filesmatch|location|locationmatch|directory|directorymatch)>/ {
 				if (dep > 0) dep--; sect = (dep > 0) ? stk[dep] : ""; head = (dep > 0) ? hst[dep] : "" }
+			# CGI switched on (Zscaler 16 Oct: "AddHandler cgi-script .pl" appended) -
+			# stock NetScaler runs no CGI scripts (its only line is commented out)
+			l ~ /^[ \t]*(addhandler|sethandler)[ \t]+"?cgi-script/ { print "HIGH\t" f ":" NR ": " $0 "  (runs scripts as CGI - stock config has this commented out)" }
 			# PHP handler for anything but .php/.phtml (e.g. .deb, .sig)
 			l ~ /^[ \t]*add(handler|type)[ \t]+"?(application\/x-httpd-php[0-9]?|php[0-9]?-script)"?([ \t]|$)/ {
 				for (i = 3; i <= NF; i++) { e = tolower($i); gsub(/"/, "", e)
@@ -1210,6 +1242,25 @@ done
 	done >> "$T/f"
 	finding COMPROMISE "SLAPSHOT tunnel, nsmon implant or known payload process" "$T/f"
 	finding REVIEW "Possible nsmon implant socket (/var/tmp/.s) - check what it is" "$T/fs"
+	# SSH keys for root / nsroot (watchTowr, 6 Oct): the attackers' keys are
+	# COMPROMISE; any other key needs a check (only type and comment are shown)
+	: > "$T/fk"; : > "$T/fk2"
+	for k in /root/.ssh/authorized_keys /flash/nsconfig/ssh/authorized_keys /flash/nsconfig/.ssh/authorized_keys; do
+		[ -f "$R$k" ] || continue
+		grep -vE '^[[:space:]]*(#|$)' "$R$k" 2>>"$E" | while IFS= read -r l; do
+			case "$l" in
+			*AAAAC3NzaC1lZDI1NTE5AAAAIByuCHWk9qsqn0xD6eO4wSOwiF8b8m6Gb+s6+nue13s3*|*AAAAB3NzaC1yc2EAAAADAQABAAABAQDCg5qES9OlsmMFLnIfWA63X2gK4VxMC4GtVeECjgIqJQQSCSDoAy6JsU3Yv9WVAUezvSCkKJ7TQYupoxmqK*)
+				printf '%s  %s  (the attackers\047 SSH key - watchTowr)\n' "$(when "$R$k")" "$k" >> "$T/fk" ;;
+			*)	printf '%s  %s  %s\n' "$(when "$R$k")" "$k" "$(printf '%s\n' "$l" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^(ssh-|ecdsa-|sk-)/) { c = ""; for (j = i + 2; j <= NF; j++) c = c " " $j; print $i c; exit } }')" >> "$T/fk2" ;;
+			esac
+		done
+	done
+	if [ -z "$R" ]; then
+		# the trojanized Dropbear SSH server listens on 37512 (watchTowr)
+		sockstat -4l 2>/dev/null | awk '$6 ~ /:37512$/' | sed 's/^/listening: /' >> "$T/fk"
+	fi
+	finding COMPROMISE "SSH backdoor: the attackers' key, or the Dropbear backdoor listening on port 37512" "$T/fk"
+	finding REVIEW "SSH keys that allow root / nsroot to log in - make sure each one is yours" "$T/fk2"
 	# Platypus remote-access agent (TENEX): the binary hides as /netscaler.local/
 	# ns_*.pl (a folder stock NetScaler does not have), its working folder is
 	# /var/core/.ns-cache. Names, or the word "platypus" alone, are only REVIEW.
@@ -1217,14 +1268,21 @@ done
 	# of its specific code strings, or a client certificate from the Platypus
 	# default CA (the known hash is check 23's). The key is never shown.
 	: > "$T/pa"; : > "$T/pa2"
-	if [ -d "$R/netscaler.local" ]; then
-		for f in "$R"/netscaler.local/*; do
+	# Binary Defense (12 Oct): the agent also as /var/tmp/.ns_<n>.pl with
+	# /var/tmp/.ns_data, an ELF program named .pl, with copied time stamps
+	pl=""; for f in "$R"/var/tmp/.ns_* "$R"/tmp/.ns_*; do [ -e "$f" ] && pl=1; done
+	if [ -d "$R/netscaler.local" ] || [ -n "$pl" ]; then
+		for f in "$R"/netscaler.local/* "$R"/var/tmp/.ns_*.pl "$R"/tmp/.ns_*.pl "$R"/var/tmp/.ns_data; do
 			[ -e "$f" ] || [ -L "$f" ] || continue
 			sig=0
 			if [ -f "$f" ]; then
 				LC_ALL=C grep -qa 'S8GEj/Ibzw/Zy9Z5u4saQyn0h59enf9Mk3J2m70tTMs=' "$f" 2>>"$E" && sig=2
+				# its build (Binary Defense) - a commit hash nothing else carries
+				LC_ALL=C grep -qaF -e '4b91c7db061615827f2d333bae4ffe10ddcbb199' -e '0.1.0-SNAPSHOT-4b91c7db' "$f" 2>/dev/null && sig=2
+				# a compiled program disguised with a .pl name
+				case "$f" in *.pl) [ "$(head -c 4 "$f" 2>/dev/null | tr -d '\177')" = ELF ] && sig=$((sig + 1)) ;; esac
 				for x in 'x-protobuf-platypus' '/api/v1/agents/enroll' '/api/v1/agent/link' '_platypus-mesh._tcp' \
-					'platypus-agent/public-ip-probe' 'platypus://server'; do
+					'platypus-agent/public-ip-probe' 'platypus://server' 'self-persistence); do not edit'; do
 					LC_ALL=C grep -qaF "$x" "$f" 2>/dev/null && sig=$((sig + 1))
 				done
 			fi
@@ -1234,7 +1292,7 @@ done
 				printf '%s  %s  (mentions Platypus - not confirmed as the agent)\n' "$(when "$f")" "${f#$R}" >> "$T/pa2"
 			else
 				case "${f##*/}" in
-				ns_*.pl) printf '%s  %s  (Platypus agent name, content not confirmed)\n' "$(when "$f")" "${f#$R}" >> "$T/pa2" ;;
+				ns_*.pl|.ns_*.pl|.ns_data) printf '%s  %s  (Platypus agent name, content not confirmed)\n' "$(when "$f")" "${f#$R}" >> "$T/pa2" ;;
 				*) printf '%s  %s  (in a folder stock NetScaler does not have)\n' "$(when "$f")" "${f#$R}" >> "$T/pa2" ;;
 				esac
 			fi
@@ -1288,18 +1346,29 @@ done
 	# the requested path only - not the Referer or the query string
 	alogs | awk 'match($0, /"[A-Z]+ [^ "]+/) { r = substr($0, RSTART + 1, RLENGTH - 1); p = r; sub(/^[A-Z]+ /, "", p); sub(/\?.*/, "", p)
 		if (p ~ /\/vpns?\/media\/nsgclient\.ico$/ || p ~ /\/[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]+\.(ico|sig)$/ ||
-		    p ~ /\/(nsgser18|nsgsupport|nsgpackage64|nsgbuild)\.deb$/ ||
+		    p ~ /\/(nsgser18|nsgsupport|nsgpackage64|nsgbuild|nsgtrust)\.deb$/ ||
 		    (p ~ /\/nsginstaller[0-9]*\.deb$/ && p !~ /\/nsginstaller64\.deb$/) ||
 		    p ~ /\/vpns?\/scripts\/linux\/[^ "?]*\.php$/ || r ~ /^POST \/vpns?\/(media|scripts|theme)\//) print }' > "$T/acc"
 	cap "$T/acc" > "$T/f"
 	[ -s "$T/f" ] && echo "(WHIPSHOT answers 404 - a 404 with a large response size means the shell ran)" >> "$T/f"
 	finding ATTEMPT "Requests for web shell URLs (<hex>.ico / .sig, nsgclient.ico, known web shell .deb names, POSTs to static paths) in the web access logs" "$T/f"
 
-	alogs | grep -E '"(INDEX|K):[A-Za-z0-9+/=]{8,}|"[A-Za-z0-9+/]{40,}={0,2}"[[:space:]]*$' > "$T/ua"
+	# base64 after any short tag ("INDEX:", "K:", random tags - Lupovis saw the
+	# log-reflection actors use random ones), or a base64-only User-Agent
+	alogs | grep -E '"(INDEX|K|[A-Za-z0-9_-]{1,16}):[A-Za-z0-9+/=]{40,}#?"|"(INDEX|K):[A-Za-z0-9+/=]{8,}|"[A-Za-z0-9+/]{40,}={0,2}"[[:space:]]*$' > "$T/ua"
 	cap "$T/ua" > "$T/f"
-	grep -oE '"(INDEX|K):[A-Za-z0-9+/=]{8,}|"[A-Za-z0-9+/]{40,}={0,2}"[[:space:]]*$' "$T/ua" |
-		sed -e 's/^"INDEX://' -e 's/^"K://' -e 's/[" ]//g' | decode >> "$T/f"
+	grep -oE '"(INDEX|K|[A-Za-z0-9_-]{1,16}):[A-Za-z0-9+/=]{8,}|"[A-Za-z0-9+/]{40,}={0,2}"[[:space:]]*$' "$T/ua" | grep -vE '^"https?:' |
+		sed -e 's/^"[A-Za-z0-9_-]*://' -e 's/[" #]//g' | decode >> "$T/f"
 	finding ATTEMPT "Base64 payloads sent as User-Agent (staging for the log-injection attack)" "$T/f"
+	# log reflection (Lupovis, 5 Oct): a whole shell script in the User-Agent
+	# after a random tag ("abc123: curl ...; cat ..."), later run by an
+	# injection that greps the tag from the access log
+	alogs | awk 'match($0, /" [0-9]+ [0-9-]+ "[^"]*" "[^"]*"/) { u = substr($0, RSTART, RLENGTH); sub(/.*" "/, "", u); sub(/"$/, "", u)
+		if (u ~ /^[A-Za-z0-9_-]{2,32}:[ \t]*[^ ]/ && u ~ /;|\||\$\(|`|&&|\$\{/ &&
+		    u ~ /(^|[^A-Za-z])(sh|curl|wget|fetch|cat|echo|tar|openssl|base64|uname|id|nc|chmod|cp|grep)([^A-Za-z]|$)/) print }' |
+		redact | cut -c1-300 > "$T/uash"
+	cap "$T/uash" > "$T/f"
+	finding ATTEMPT "Shell scripts sent as User-Agent after a tag (log reflection: an injection later runs them from the access log)" "$T/f"
 
 	# base64 PHP ("PD9" = "<?") inside a User-Agent: a web shell staged
 	# through the access log, e.g. on GET /vpn/media/*.ico (eSentire)
@@ -1396,7 +1465,7 @@ done
 	# SAML attack payload server (Beaumont, via PitScaler; Poppelgaard 1.10); Gotham
 	# incident response, community and Sygnia/LevelBlue (via Poppelgaard 1.11, 2-3 Oct)
 	IPS="$IPS|213\\.209\\.159\\.55|38\\.134\\.148\\.238|167\\.148\\.88\\.236|45\\.76\\.34\\.141|209\\.250\\.236\\.77|138\\.68\\.21\\.29|170\\.64\\.176\\.26"
-	IPS="$IPS|139\\.162\\.83\\.159|139\\.162\\.75\\.170|207\\.148\\.105\\.57|64\\.176\\.71\\.42|194\\.127\\.166\\.126|91\\.199\\.163\\.55|103\\.214\\.20\\.54|109\\.136\\.126\\.142|79\\.133\\.42\\.141|146\\.70\\.199\\.53|135\\.136\\.98\\.176|170\\.64\\.143\\.206|165\\.227\\.228\\.21"
+	IPS="$IPS|139\\.162\\.83\\.159|139\\.162\\.75\\.170|207\\.148\\.105\\.57|64\\.176\\.71\\.42|91\\.199\\.163\\.55|103\\.214\\.20\\.54|109\\.136\\.126\\.142|79\\.133\\.42\\.141|146\\.70\\.199\\.53|135\\.136\\.98\\.176|170\\.64\\.143\\.206|165\\.227\\.228\\.21"
 	IPS="$IPS|139\\.59\\.86\\.242|159\\.223\\.233\\.184|64\\.227\\.181\\.23|85\\.11\\.187\\.35|66\\.173\\.222\\.26|185\\.231\\.33\\.46|5\\.83\\.144\\.60|167\\.88\\.172\\.6|143\\.244\\.44\\.177|31\\.56\\.197\\.137|23\\.234\\.83\\.194|23\\.234\\.109\\.28|23\\.234\\.80\\.246"
 	# Cloudflare WARP exits the actor used - shared with ordinary WARP users
 	# Beazley BSL-A1216 second wave (3 Oct; 158.94.211.205 is a callback on
@@ -1407,24 +1476,55 @@ done
 	# CVE-2026-88779 crash payloads (138.199.60.5, Gotham, 5 Oct), via the
 	# Poppelgaard checker 1.13
 	IPS="$IPS|138\\.199\\.60\\.5|138\\.199\\.60\\.22|138\\.199\\.60\\.36|146\\.70\\.199\\.170|146\\.70\\.211\\.157|23\\.162\\.8\\.173"
+	# key-theft exfiltration server on port 8877 (Poppelgaard 1.14 field report,
+	# Defused 4 Oct) and exploit delivery from the Beazley BSL-A1216 table
+	# (updated 4 Oct, via PitScaler)
+	IPS="$IPS|81\\.94\\.239\\.8|104\\.207\\.32\\.77|104\\.207\\.46\\.202|104\\.207\\.47\\.54"
+	# watchTowr IoC list (6 Oct): exploitation sources, and the Sliver C2 server
+	# 176.65.148.54 (moved here from the scanner list below)
+	IPS="$IPS|176\\.65\\.148\\.54|104\\.168\\.34\\.24|104\\.234\\.140\\.124|104\\.234\\.140\\.132|141\\.98\\.212\\.82|159\\.26\\.112\\.64|165\\.22\\.100\\.102|165\\.22\\.104\\.177|185\\.135\\.77\\.63"
+	IPS="$IPS|206\\.189\\.107\\.84|212\\.86\\.125\\.40|32\\.186\\.46\\.211|45\\.12\\.239\\.191|45\\.225\\.135\\.18|45\\.61\\.144\\.161|52\\.38\\.11\\.186|52\\.39\\.16\\.162|66\\.42\\.100\\.63|78\\.128\\.114\\.22"
+	# 8 Oct (Poppelgaard 1.15/1.16, Lupovis): SOCRadar "NetScaler C2" 45.143.130.195,
+	# 64.177.53.67 with its own stage 2 on :65533, LogonUISimple probes 23.234.80.205,
+	# Huntback.io decoys (7 Oct: OOB proving, ns.conf theft, tunnel backing host, web
+	# shell, log-channel C2, bot download; Tor exits only as leads), and three sources
+	# moved here from the scanner list (OOB proving on decoys, also watchTowr)
+	IPS="$IPS|45\\.143\\.130\\.195|64\\.177\\.53\\.67|23\\.234\\.80\\.205|194\\.54\\.83\\.22|107\\.189\\.7\\.141|109\\.71\\.252\\.97|185\\.121\\.170\\.60|185\\.243\\.218\\.225"
+	IPS="$IPS|204\\.8\\.96\\.74|77\\.247\\.126\\.239|45\\.59\\.125\\.187|130\\.12\\.182\\.7|46\\.151\\.182\\.131|172\\.247\\.44\\.85|23\\.234\\.74\\.48|137\\.220\\.53\\.135"
+	# Zscaler ThreatLabz (16 Oct): download server of a Rust FreeBSD implant
+	# (also seen in Magento attacks - possibly shared infrastructure)
+	IPS="$IPS|209\\.141\\.43\\.95"
 	IPSN=$IPS
 	IPS="$IPS|104\\.28\\.215\\.13[67]|104\\.28\\.247\\.13[67]"
-	{ logs; logs messages; alogs; } | notadmin | grep -oE "(^|[^0-9.])($IPS)([^0-9]|\$)" |
-		grep -oE "$IPS" | sort | uniq -c |
-		awk '{ printf "%-16s %d log line(s)%s\n", $2, $1, ($2 ~ /^104\.28\./ ? "  (Cloudflare WARP - also used by ordinary WARP users)" : "") }' > "$T/f"
+	# One pass over all logs: every IPv4 address is counted once per line, and
+	# the few lines naming a listed domain are kept aside. The long patterns
+	# below then run on these short lists only - fast also on huge logs.
+	: > "$T/domlines"
+	{ logs; logs messages; alogs; } | notadmin | awk -v dl="$T/domlines" '
+		{ l = $0; split("", s)
+		  while (match(l, /[0-9][0-9]?[0-9]?[.][0-9][0-9]?[0-9]?[.][0-9][0-9]?[0-9]?[.][0-9][0-9]?[0-9]?/)) {
+			pre = (RSTART > 1) ? substr(l, RSTART - 1, 1) : ""; nx = substr(l, RSTART + RLENGTH, 1)
+			ip = substr(l, RSTART, RLENGTH); l = substr(l, RSTART + RLENGTH)
+			if (pre ~ /[0-9.]/ || nx ~ /[0-9]/) continue
+			if (!(ip in s)) { s[ip] = 1; c[ip]++ } }
+		  if (tolower($0) ~ /echvista|entretiensol|white-guard|pylrk|ctrxsrv|v5v[.]in|gs[.]thc|gsocket|garyvard|hickoryusedauto|gurerasfalt|rockinroyaltykids|currydownsrvpark/) print > dl }
+		END { for (ip in c) print c[ip] "\t" ip }' > "$T/ipc"
+	TAB=$(printf '\t')
+	grep -E "$TAB($IPS)\$" "$T/ipc" | sort -t "$TAB" -k2 |
+		awk -F '\t' '{ printf "%-16s %d log line(s)%s\n", $2, $1, ($2 ~ /^104\.28\./ ? "  (Cloudflare WARP - also used by ordinary WARP users)" : "") }' > "$T/f"
 	# attacker domains (IFIN, Arctic Wolf)
-	{ logs; logs messages; alogs; } | notadmin |
+	cat "$T/domlines" |
 		# IFIN, Arctic Wolf, TENEX (white-guard.pro resolves to the main C2 server);
 		# pylrk.cc serves the payload of the SAML attack on fixed builds (Oct 2026),
 		# (pyrlnk.cc, read from a screenshot, is an unregistered misspelling);
 		# gs.thc.org / gsocket.io: gsocket relays
-		grep -oiE '(^|[^A-Za-z0-9-])([A-Za-z0-9-]+\.)*(echvista\.com|entretiensol\.com|white-guard\.pro|pylrk\.cc|gs\.thc\.org|gsocket\.io)\.?([^A-Za-z0-9.-]|$)' |
-		grep -oiE 'echvista\.com|entretiensol\.com|white-guard\.pro|pylrk\.cc|gs\.thc\.org|gsocket\.io' | tr 'A-Z' 'a-z' |
+		grep -oiE '(^|[^A-Za-z0-9-])([A-Za-z0-9-]+\.)*(echvista\.com|entretiensol\.com|white-guard\.pro|pylrk\.cc|ctrxsrv\.com|v5v\.in|gs\.thc\.org|gsocket\.io)\.?([^A-Za-z0-9.-]|$)' |
+		grep -oiE 'echvista\.com|entretiensol\.com|white-guard\.pro|pylrk\.cc|ctrxsrv\.com|v5v\.in|gs\.thc\.org|gsocket\.io' | tr 'A-Z' 'a-z' |
 		sort | uniq -c | awk '{ printf "%-16s %d log line(s)  (attacker domain)\n", $2, $1 }' >> "$T/f"
 	finding ATTEMPT "Known attacker IP addresses in the logs" "$T/f"
 	# Domains only listed in the attackers' TLS certificate (TENEX: operator-
 	# associated with moderate confidence, control not proven): a lead, no more
-	{ logs; logs messages; alogs; } | notadmin |
+	cat "$T/domlines" |
 		grep -oE '(^|[^A-Za-z0-9-])([A-Za-z0-9-]+\.)*(garyvard\.com|hickoryusedauto\.com|gurerasfalt\.com|rockinroyaltykids\.com|currydownsrvpark\.com)([^A-Za-z0-9.-]|$)' |
 		grep -oE 'garyvard\.com|hickoryusedauto\.com|gurerasfalt\.com|rockinroyaltykids\.com|currydownsrvpark\.com' |
 		sort | uniq -c | awk '{ printf "%-24s %d log line(s)\n", $2, $1 }' > "$T/f4"
@@ -1433,11 +1533,16 @@ done
 	# unattributed wave TENEX saw (199.233.217.13, 130.94.20.222) (via
 	# PitScaler.com), and residential-proxy probe senders Gotham saw (via the
 	# Poppelgaard checker 1.11): a hunting lead only.
-	OPP='172\.247\.44\.85|165\.227\.201\.112|173\.231\.39\.244|64\.225\.103\.14|159\.65\.104\.231|142\.93\.205\.229|182\.101\.54\.57|87\.224\.84\.82|137\.220\.53\.135|120\.28\.233\.211|149\.28\.58\.71|23\.234\.111\.22|198\.13\.159\.233|85\.221\.203\.85|46\.150\.68\.55|159\.26\.103\.184|45\.249\.89\.172|197\.52\.9\.138|180\.242\.113\.168|85\.117\.117\.248|73\.43\.85\.7|88\.180\.103\.22|194\.28\.195\.90|95\.63\.246\.50|31\.13\.192\.160|185\.170\.55\.89|104\.203\.50\.26|37\.19\.221\.171|45\.143\.167\.96|206\.232\.71\.215|130\.94\.106\.141|58\.187\.56\.89|171\.106\.10\.118|82\.24\.212\.15|178\.66\.43\.241|185\.209\.15\.246|94\.190\.77\.195|93\.177\.60\.233|68\.46\.140\.222|178\.218\.40\.232|49\.36\.107\.103|191\.37\.30\.194|23\.234\.74\.48|72\.73\.231\.73|95\.229\.84\.239|113\.137\.102\.68|47\.243\.125\.255|47\.76\.92\.109|8\.217\.173\.25|8\.210\.67\.91|47\.239\.205\.29|47\.76\.132\.65|8\.218\.219\.56|47\.76\.102\.1|47\.76\.63\.52|8\.210\.119\.74|64\.177\.93\.71|44\.252\.255\.141|194\.242\.130\.193|125\.122\.56\.47|23\.132\.164\.35|54\.70\.59\.128|44\.226\.128\.41|4\.246\.63\.96|176\.65\.148\.54|199\.233\.217\.13|130\.94\.20\.222|13\.59\.243\.24|100\.40\.202\.26|114\.181\.20\.159|114\.37\.217\.107|142\.129\.220\.168|153\.66\.69\.45|173\.77\.155\.230|184\.12\.39\.60|199\.79\.241\.36|202\.60\.177\.157|204\.210\.216\.23|209\.79\.172\.70|209\.99\.184\.231|210\.252\.36\.116|24\.126\.15\.56|27\.98\.42\.70|45\.36\.42\.217|47\.227\.98\.207|66\.188\.65\.11|67\.224\.124\.236|68\.99\.0\.48|71\.163\.14\.19|71\.163\.176\.214|73\.22\.64\.16|74\.244\.147\.208|74\.99\.67\.70|76\.36\.174\.5|76\.72\.187\.172|96\.248\.121\.105|97\.205\.234\.34|98\.29\.80\.205|99\.110\.24\.72|185\.218\.86\.25|79\.141\.161\.139|216\.252\.238\.222|38\.60\.206\.53|38\.60\.212\.144|149\.102\.254\.17|130\.94\.19\.84|138\.199\.60\.[0-9]{1,3}'
-	{ logs; alogs; } | notadmin | grep -oE "(^|[^0-9.])($OPP)([^0-9]|\$)" |
-		# (138.199.60.x: the range the SAML attack came from, Gotham; addresses
+	OPP='165\.227\.201\.112|173\.231\.39\.244|64\.225\.103\.14|159\.65\.104\.231|142\.93\.205\.229|182\.101\.54\.57|87\.224\.84\.82|120\.28\.233\.211|149\.28\.58\.71|23\.234\.111\.22|198\.13\.159\.233|85\.221\.203\.85|46\.150\.68\.55|159\.26\.103\.184|45\.249\.89\.172|197\.52\.9\.138|180\.242\.113\.168|85\.117\.117\.248|73\.43\.85\.7|88\.180\.103\.22|194\.28\.195\.90|95\.63\.246\.50|31\.13\.192\.160|185\.170\.55\.89|104\.203\.50\.26|37\.19\.221\.171|45\.143\.167\.96|206\.232\.71\.215|130\.94\.106\.141|58\.187\.56\.89|171\.106\.10\.118|82\.24\.212\.15|178\.66\.43\.241|185\.209\.15\.246|94\.190\.77\.195|93\.177\.60\.233|68\.46\.140\.222|178\.218\.40\.232|49\.36\.107\.103|191\.37\.30\.194|72\.73\.231\.73|95\.229\.84\.239|113\.137\.102\.68|47\.243\.125\.255|47\.76\.92\.109|8\.217\.173\.25|8\.210\.67\.91|47\.239\.205\.29|47\.76\.132\.65|8\.218\.219\.56|47\.76\.102\.1|47\.76\.63\.52|8\.210\.119\.74|64\.177\.93\.71|44\.252\.255\.141|194\.242\.130\.193|125\.122\.56\.47|23\.132\.164\.35|54\.70\.59\.128|44\.226\.128\.41|4\.246\.63\.96|199\.233\.217\.13|130\.94\.20\.222|13\.59\.243\.24|100\.40\.202\.26|114\.181\.20\.159|114\.37\.217\.107|142\.129\.220\.168|153\.66\.69\.45|173\.77\.155\.230|184\.12\.39\.60|199\.79\.241\.36|202\.60\.177\.157|204\.210\.216\.23|209\.79\.172\.70|209\.99\.184\.231|210\.252\.36\.116|24\.126\.15\.56|27\.98\.42\.70|45\.36\.42\.217|47\.227\.98\.207|66\.188\.65\.11|67\.224\.124\.236|68\.99\.0\.48|71\.163\.14\.19|71\.163\.176\.214|73\.22\.64\.16|74\.244\.147\.208|74\.99\.67\.70|76\.36\.174\.5|76\.72\.187\.172|96\.248\.121\.105|97\.205\.234\.34|98\.29\.80\.205|99\.110\.24\.72|185\.218\.86\.25|79\.141\.161\.139|216\.252\.238\.222|38\.60\.206\.53|38\.60\.212\.144|149\.102\.254\.17|130\.94\.19\.84|138\.199\.60\.[0-9]{1,3}|194\.127\.166\.(19|32|36|70|126)|185\.220\.101\.54|192\.42\.116\.(62|65|101)|185\.100\.87\.166|72\.5\.65\.111|45\.153\.212\.10|146\.233\.40\.20|46\.236\.167\.143|46\.33\.33\.95|49\.150\.197\.119|78\.190\.152\.64|81\.10\.79\.197|95\.105\.74\.172|100\.38\.125\.66|102\.213\.132\.123|102\.222\.146\.45|103\.181\.212\.245|103\.197\.249\.161|103\.83\.146\.100|111\.92\.128\.89|114\.145\.49\.215|120\.244\.160\.182|125\.62\.88\.26|154\.183\.158\.198|154\.241\.254\.9|174\.60\.63\.37|177\.52\.203\.23|183\.63\.88\.227|190\.117\.56\.56|195\.62\.37\.119|207\.48\.184\.10'
+	grep -E "$TAB($OPP)\$" "$T/ipc" | grep -vE "$TAB($IPS)\$" | sort -t "$TAB" -k1,1rn |
+		# (Zscaler ThreatLabz 16 Oct: 26 exploitation sources, mostly residential or
+		# compromised hosts; 185.220.101.54, 192.42.116.x, 185.100.87.166: Tor exits seen in the ns.conf
+		# theft on decoys, Huntback.io; 72.5.65.111: unverified community report;
+		# 194.127.166.x: Mullvad VPN exits that polled .ctxs.receiver web shells -
+		# shared with ordinary users, Team Cymru / Defused;
+		# 138.199.60.x: the range the SAML attack came from, Gotham; addresses
 		# listed as attackers above are not counted again here)
-		grep -oE "$OPP" | grep -vxE "$IPS" | sort | uniq -c | sort -rn | awk '{ printf "%-16s %d log line(s)\n", $2, $1 }' > "$T/f3"
+		awk -F '\t' '{ printf "%-16s %d log line(s)\n", $2, $1 }' > "$T/f3"
 	finding ATTEMPT "Opportunistic scanners and unattributed attack waves (GreyNoise, TENEX) - hunting lead only, often residential or proxy addresses: do not block on this alone" "$T/f3"
 	# Live connections (not the shared WARP addresses): from the box out to a
 	# listed IP is COMPROMISE; to a service port of the box (an attack or scan
@@ -1478,12 +1583,22 @@ done
 		for d in /tmp /var/tmp; do [ -d "$R$d" ] && find "$R$d" -maxdepth 1 \( -name '.slap*' -o -name '.s2loot*' \) 2>>"$E"; done
 		# its upload staging: loot_nsconfig.tgz, loot_nshist.tgz, loot_httpd.conf,
 		# loot_diag.txt (via Gotham, Poppelgaard 1.12)
+		# Zscaler ThreatLabz (16 Oct): Rust FreeBSD implant fetched to /var/kw2s11
+		[ -e "$R/var/kw2s11" ] && printf '%s\n' "$R/var/kw2s11"
+		# SOCRadar "NetScaler C2" polling agent (7 Oct, via Poppelgaard 1.15)
+		for d in /tmp /var/tmp; do [ -d "$R$d" ] && find "$R$d" -maxdepth 1 -name '.nsagent*' 2>>"$E"; done
+		# watchTowr (6 Oct): proof markers, the Sliver implant ns_helper
+		for p in /var/tmp/cve88771 /var/tmp/cve88771_round2 /var/netscaler/logon/LogonPoint/ns_ctx.html \
+			/var/netscaler/logon/LogonPoint/ns0e82mz.txt /var/vpn/ns_helper /flash/nsconfig/.ns_helper; do
+			if [ -e "$R$p" ] || [ -L "$R$p" ]; then printf '%s\n' "$R$p"; fi
+		done
+		[ $# -gt 0 ] && find "$@" -type f -name 'pwn.txt' 2>>"$E"
 		# the FreeBSD Sliver implant saved as citrix3.bad (PitScaler, 3 Oct)
 		for d in /tmp /var/tmp /var/core /var/netscaler /flash/nsconfig; do [ -d "$R$d" ] && find "$R$d" -maxdepth 4 -name 'citrix3.bad*' 2>>"$E"; done
 		for d in /tmp /var/tmp $WEB; do [ -d "$R$d" ] && find "$R$d" -maxdepth 4 -type f \( -name 'loot_nsconfig.tgz' -o -name 'loot_nshist.tgz' \
 			-o -name 'loot_httpd.conf' -o -name 'loot_diag.txt' \) 2>>"$E"; done
 		for d in /flash/nsconfig /var/tmp /tmp; do [ -d "$R$d" ] && find "$R$d" -maxdepth 3 -type f \( -name 'slapshot.py' -o -name 'whipd.py' \) 2>>"$E"; done
-		[ $# -gt 0 ] && find "$@" -type f \( -name 'nx_verify.html' -o -name 'nx_proof.html' -o -name 'Nx_[0-9]*.html' -o -name 'c88771*' -o -name 'xua.html' \) 2>>"$E"
+		[ $# -gt 0 ] && find "$@" -type f \( -name 'nx_verify.html' -o -name 'nx_proof.html' -o -name 'Nx_[0-9]*.html' -o -name 'Nx_[0-9]*.php' -o -name 'Nx_[0-9]*.pl' -o -name 'c88771*' -o -name 'xua.html' \) 2>>"$E"
 		# proof files of the "Nx-zD" payload (other names, same marker text)
 		for d in /var/vpn/bookmark /netscaler/ns_gui/vpn /var/netscaler/gui/vpn /var/netscaler/logon/LogonPoint /netscaler/ns_gui/cgi; do
 			[ -d "$R$d" ] && find "$R$d" -maxdepth 1 -type f -name '*.html' -exec grep -lE 'Nx-zD|NX-CVE-OK' {} + 2>>"$E"
@@ -1497,7 +1612,7 @@ done
 	# PHP-carrying package is reported by check 13 from its content.
 	: > "$T/f5"
 	for d in /var/netscaler/gui/vpn/scripts/linux /netscaler/ns_gui/vpn/scripts/linux; do
-		[ -d "$R$d" ] && find "$R$d" -maxdepth 1 -type f \( \( -name 'nsginstaller*.deb' ! -name 'nsginstaller64.deb' \) -o -name 'nsgclient18.deb' -o -name 'nsgclient18_32.deb' \
+		[ -d "$R$d" ] && find "$R$d" -maxdepth 1 -type f \( \( -name 'nsginstaller*.deb' ! -name 'nsginstaller64.deb' \) -o -name 'nsgclient18.deb' -o -name 'nsgclient18_32.deb' -o -name 'nsgtrust.deb' \
 			-o -name 'nsgser18.deb' -o -name 'nsgsupport.deb' -o -name 'nsgpackage64.deb' -o -name 'nsgbuild.deb' \
 			-o -name 'nsg64.deb' \) 2>>"$E"
 	done | list | sed 's/$/  (a name the web shells used - compare its SHA-256 with a clean box)/' > "$T/f5"
@@ -1534,10 +1649,13 @@ done
 	# wtw*; Gotham: lula, /var/1.py, /var/tmp/sh; the Sliver implant as
 	# /var/tmp/.host per VirusTotal) - also ordinary names
 	: > "$T/f9"
-	{ for p in /.x /s /tmp/s /var/tmp/s /lula /tmp/lula /var/tmp/lula /var/1.py /var/tmp/sh /var/tmp/.host; do
+	{ for p in /.x /s /tmp/s /var/tmp/s /lula /tmp/lula /var/tmp/lula /var/1.py /var/tmp/sh /var/tmp/.host \
+		/var/1 /var/walk /usr/bin/walk /var/netscaler/logon/LogonPoint/logon.js /tmp/.p /var/tmp/.p; do
 		if [ -e "$R$p" ] || [ -L "$R$p" ]; then printf '%s\n' "$R$p"; fi
 	  done
 	  for d in /tmp /var/tmp; do [ -d "$R$d" ] && find "$R$d" -maxdepth 1 \( -name 'wtw*' -o -name 'boom*' \) ! -name 'wtw888*' 2>>"$E"; done
+	  # p.txt: a proof marker of the "smash and grab" payload (watchTowr), also a common name
+	  set -- $(dirs "$WEB"); [ $# -gt 0 ] && find "$@" -type f -name 'p.txt' 2>>"$E"
 	  # other loot_* names: the published ones are COMPROMISE above
 	  for d in /tmp /var/tmp $WEB; do [ -d "$R$d" ] && find "$R$d" -maxdepth 4 -type f -name 'loot_*' ! -name 'loot_nsconfig.tgz' \
 		! -name 'loot_nshist.tgz' ! -name 'loot_httpd.conf' ! -name 'loot_diag.txt' 2>>"$E"; done
@@ -1549,6 +1667,15 @@ done
 	for p in /v /tmp/v /var/tmp/v; do [ -f "$R$p" ] && printf '%s\n' "$R$p"; done |
 		list | sed 's/$/  (the name the SAML attack saves its payload under - check what it is)/' > "$T/f7"
 	finding REVIEW "A file named /v (the SAML attack saves its payload as /v)" "$T/f7"
+	# config or private keys copied into a web folder, under any name (Lupovis:
+	# ns.conf files and SSL keys dumped into a random .css in LogonPoint). The
+	# admin GUI code is skipped: its libraries name these markers as strings.
+	: > "$T/f10"
+	# shellcheck disable=SC2046
+	set -- $(dirs "$WEB")
+	[ $# -gt 0 ] && find "$@" -type f -size -20000k ! -path '*/admin_ui/*' -exec grep -lE '^-----BEGIN (RSA |EC |DSA |ENCRYPTED )?PRIVATE KEY-----|^#NS[0-9]+\.[0-9]+ Build|^set ns config |^add ns ip |^set ns hostName |^===(CONF|KEY):' {} + 2>>"$E" |
+		list | sed 's/$/  (contains a private key or NetScaler config - do not open it on the box)/' > "$T/f10"
+	finding COMPROMISE "Private keys or NetScaler config in a web folder - copied there to be downloaded" "$T/f10"
 	# Startup scripts and crontabs that mention the SAML-attack kit: a mention
 	# (echo, pgrep, a check) is not a launch - REVIEW with the line; the kit
 	# files themselves are COMPROMISE above
@@ -1585,11 +1712,16 @@ done
 			if (!noip && k) printf "    from %s%s\n", ips, (k > 5 ? " and " k - 5 " more" : "")
 			if (!noip && lo) printf "    %sfrom 127.0.0.x - the NetScaler itself, this log does not show the real client\n", (k ? "also " : "") }'; }
 	{
-		alogs | grep -E 'httpworkbench|oast\.fun|dnsl\.cc|webhook\.site|dnshook\.site|Team-NetScaler-Inventory|"[A-Z]+ /nsconmsg|NX-CVE-OK|Nx-zD|nx_verify|nx_proof|/Nx_[0-9]+\.html|wtw888|ns-88771-poc|PoCbit' | sum "exploit canary / scanner strings"
-		alogs | grep -E 'LogonPoint/custom/receiver(\.v2)?\.min(\.[0-9a-f]+)?\.css|\.(ctxs|slap)\.receiver|"[A-Z]+ /[^ "?]*/LogonPoint/[^ "?]*[^/ "?]\.receiver([ ?.])' | sum "requests for *.receiver web shells (.ctxs.receiver, .slap.receiver, random names)"
+		alogs | grep -E 'httpworkbench|CVE-2026-88771-scanner|pinggy\.net|serveousercontent\.com|ddns\.1433\.eu\.org|staticship\.org|smartdnslog\.com|ArtifactChecker/|/id009\.txt|/rce\.txt|oast\.fun|dnsl\.cc|webhook\.site|dnshook\.site|Team-NetScaler-Inventory|"[A-Z]+ /nsconmsg|NX-CVE-OK|Nx-zD|nx_verify|nx_proof|/Nx_[0-9]+\.html|wtw888|ns-88771-poc|PoCbit' | sum "exploit canary / scanner strings"
+		alogs | grep -E 'LogonPoint/custom/receiver(\.v[0-9]+)?\.min(\.[0-9a-f]+)?\.cssg?|/receiver\.deb[ ?"]|\.(ctxs|slap)\.receiver|"[A-Z]+ /[^ "?]*/LogonPoint/[^ "?]*[^/ "?]\.receiver([ ?.])' | sum "requests for *.receiver web shells (.ctxs.receiver, .slap.receiver, random names)"
+		# the key-theft payload writes a random 6-character .css into LogonPoint and
+		# fetches it (Poppelgaard 1.14 field report): 404 = failed, 200 = check it
+		alogs | awk 'match($0, /"(GET|HEAD) \/logon\/LogonPoint\/[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9]\.css[ ?]/) {
+			n = substr($0, RSTART, RLENGTH); sub(/.*LogonPoint\//, "", n); sub(/\.css.*/, "", n)
+			if (n ~ /[0-9]/ && n ~ /[A-Za-z]/) print }' | sum "requests for random 6-character .css files in LogonPoint (pick-up of the config / key theft - a 200 needs a look)"
 		# CVE-2026-88779 probes (Lupovis): User-Agent probe/1, or a very long
 		# request to the SAML endpoints - a hunting lead, not proof
-		alogs | awk '/"probe\/1"/ || (/"(GET|POST|HEAD) \/(saml\/login|cgi\/samlauth)/ && length($0) > 2500)' | cut -c1-400 |
+		alogs | awk '/"probe\/1"/ || (/"(GET|POST|HEAD) \/(saml\/login|saml\/logout|cgi\/samlauth)/ && length($0) > 2500)' | cut -c1-400 |
 			sum "SAML probes (User-Agent probe/1 or very long /saml/login, /cgi/samlauth requests - CVE-2026-88779 lead)"
 		alogs | grep -E '/logon/LogonPoint/css/LogonUISimple\.html\.style\.min(\.[0-9a-fA-F]+)?\.css[ ?]' | sum "requests for the .local_journal web shell alias"
 		alogs | grep -E '"[A-Z]+ /logon/insight-new\.js[ ?]' | sum "requests for insight-new.js (stolen config staged here)"
@@ -1608,13 +1740,18 @@ done
 		# Unit 42 web shell login token
 		# + Poppelgaard 1.11/1.12: setuid shell, forced reboot, NSX markers, the SAML
 		# attack's /t/<hex> download path, the Platypus agent install and token
-		pl='xd7h/|nsmon|update_c08937|update_result_|/dev/tcp/|nc[[:space:]]+-e[[:space:]]|base64[[:space:]]+-w0|exec-ok|HTTP_X_UX|HTTP_NSC_(LDAP|CLIENTTYPE)|e826d7ddf3c85920|chmod[[:space:]]+[+]?6555|nsshutdown[^a-z]{1,8}-R|;#[[:space:]]*NSX[0-9a-fA-F]|:443/t/[0-9a-f]{6}|/api/v1/install/|AGENT_TOKEN|plt_[a-z0-9]{12,}[.]'
+		pl='xd7h/|nsmon|update_c08937|update_result_|/dev/tcp/|nc[[:space:]]+-e[[:space:]]|base64[[:space:]]+-w0|exec-ok|HTTP_X_UX|HTTP_NSC_(LDAP|CLIENTTYPE)|e826d7ddf3c85920|chmod[[:space:]]+[+]?6555|nsshutdown[^a-z]{1,8}-R|;#[[:space:]]*NSX[0-9a-fA-F]|:443/t/[0-9a-f]{6}|/api/v1/install/|AGENT_TOKEN|plt_[a-z0-9]{12,}[.]|--data-binary[[:space:]]*@|:8877/|:8899/s/|src=agent|[.]oob[.][0-9]+[.][0-9]+[.]|:65533/s|i77AMHeTM1Z7892K|/files/kw2-freebsd|"(fefypa|fdylo9):'
 		{ alogs; errlogs; } | grep -E "$pl" | sum "payload strings / web shell header names"
 		{ logs; logs messages; } | notadmin | grep -E "$pl" | sum "payload strings in ns.log / messages" noip
 		# attack payloads in requests to the login pages (Deyda) - still visible
 		# after ns.log has rotated; normal logins are not matched
 		{ alogs; errlogs; } | grep -iE '(/nf/auth/doAuthentication\.do|/cgi/login|/p/u/doLogon\.do|/logon/LogonPoint/tmindex\.html|/logon/LogonPoint/Authentication/GetUserName)[^[:cntrl:]]*(pitboss|NSPPE|PPE unexpectedly died|missed too many heartbeats|%3B|%60|\$\{IFS\}|curl[[:space:]]|wget[[:space:]]|fetch[[:space:]])' |
 			sum "attack payloads in login-page requests"
+		# the same injection sent on any other path or in the User-Agent (Huntback.io:
+		# 14 of 1,069 injections, including an ns.conf copy)
+		alogs | grep -iE '(pitboss|PPE unexpectedly died|missed too many heartbeats)[^"]*(\$\{IFS|`|\$\(|;|\|[[:space:]]*sh)' |
+			grep -viE '(/nf/auth/doAuthentication\.do|/cgi/login|/p/u/doLogon\.do|/logon/LogonPoint/tmindex\.html|/logon/LogonPoint/Authentication/GetUserName)' |
+			sum "injection text in other web requests (any path or User-Agent)"
 	} > "$T/f"
 	finding ATTEMPT "Exploit, scanner and probe strings in the logs (the box was found and tested)" "$T/f"
 	# Requests for names the attackers used that are also ordinary or ambiguous:
@@ -1782,12 +1919,13 @@ done
 	fi
 	finding REVIEW "Saved config: new system users or EPA failures let through - make sure an admin did this" "$T/f4"
 	# the update_c08937.pl payload creates the admin account sec_monitor (SpiderLabs)
+	# or gw_health (watchTowr, 6 Oct)
 	: > "$T/f5"
 	# print only the command words - the saved line carries the password hash
-	[ -f "$R$c" ] && awk -v f="$c" '/^(add|bind) system user sec_monitor( |$)/ {
+	[ -f "$R$c" ] && awk -v f="$c" '/^(add|bind) system user (sec_monitor|gw_health)( |$)/ {
 		printf "%s:%d: %s %s %s %s%s  (account created by a published payload)\n", f, NR, $1, $2, $3, $4, ($1 == "bind" ? " " $5 : "") }' "$R$c" 2>>"$E" >> "$T/f5"
-	grep -E 'system user sec_monitor( |$)' "$T/cmd" >> "$T/f5"
-	finding COMPROMISE "Admin account sec_monitor - created by the update_c08937.pl payload" "$T/f5"
+	grep -E 'system user (sec_monitor|gw_health)( |$)' "$T/cmd" >> "$T/f5"
+	finding COMPROMISE "Admin account sec_monitor or gw_health - created by the update_c08937.pl payload" "$T/f5"
 ) || { echo "[SKIPPED] check 22 (Admin accounts and EPA) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 23. Known web shell / payload files by hash and by code -------------
@@ -1805,6 +1943,10 @@ done
 	# 1.10, single-source): kit dropper, Perl payload, Sliver download script.
 	# Via Gotham / Poppelgaard 1.12 (3 Oct): the /v script, kit generations 2
 	# and 3, chisel, Sliver implants (FreeBSD Sliver 0188b0eb: PitScaler, Expel).
+	# watchTowr (6 Oct): Sliver ns_helper, update_c08937.pl and its web shell,
+	# the SSH backdoor dropper /var/1 and binary /var/walk, /usr/bin/walk.
+	# CISA SIGMA rule r1 (13 Oct, 8 file hashes) and Gotham kit hashes (via
+	# Poppelgaard 1.15/1.16).
 	H="6f5a2a452a7901323abd21879c6cecccb47c06aeeaccb1b467212f3b11e4b1e7 ed082f744f035035900f67edf438f2f7d0528ac501234f63d476d65273cdb9a1
 	5ea5ea61e9062822bee3f66ef5ff47c217178d9e31936ad6daf10c5dfae44d12 7add390ceee4a1373211b3e340451b34f08965fc4d805f94c9b8cebdc0775774
 	73b74309f4728d169cc9edfb2767c5aadd75d39b62de93c935a86c777d2646bc 9c7bf01d2c2cb31a3609d27c1bc9abc60d86e37b7f9908547e0c75fb18b99aab
@@ -1819,7 +1961,16 @@ done
 	b9bc8d87ef77f63082445f5664e02a84db568f6d8147e077b97dc15df9f2a36b 12ff1448594844ffe072674e4da36c2bb92bce19bfdf494bcae0542ce6e1731a
 	d04663bdab3183c94381d19eec7af59f90890497d5ad95c7af1c00d0fe8901dc 0a7f88a74e82725e8ceaf9aa0b25b43c43105ff7653b29a0cbba94ce40b04447
 	602b859d38c02c559f62e5c6f7ba30265b2ffd7faf528a3b0151727c7a1dc2d3 899299dcaa6531e450cfc844f7948bc3180c6cbebc43cf751e65ee261f6732cd
-	84f23d964ab636c81d95c3185f06a2ec628a9762dc767131d775500caf8dda0a 0188b0eba4b01c4fb838df9d1d76c76d7f1dc22897e25161975b606c134c1027"
+	84f23d964ab636c81d95c3185f06a2ec628a9762dc767131d775500caf8dda0a 0188b0eba4b01c4fb838df9d1d76c76d7f1dc22897e25161975b606c134c1027
+	6c8929c6bc1ad59c4742d2671b797a08e36b8f3ec6ab479afc08bec62a3c2657 0e9e1a1644c0f445fe20735f6ab56e0ba61c9e51d76c34e14e729a9db9d78bf1
+	c0ebf54be0aeddd5b953df8a60bff7fc88d571e948405c24f6b5d6c1aa17558a 6caf647ec5a440739b7ef073ccf30463ace79a17c9195eb528ea826c4c0000c4
+	530fb1522dc0a023bc3412d576c52a553933d302ed445475501acf8e7cfea46b
+	04db3fc44c81886844ef47949d7f352953a6bf1be4866be1fb3e7e12c452e3ac 2d2c2f6842982f7e1cb894ce915d39f2a9861009c7ecb1b90da803f2c3c608f4
+	38b7c597c3f33f2caa2b2de9873f15cf9cb9984b0eacb801ef4b654a96ba9bd0 89b64bd45478e53299f9c422cbba40fac3ac0712b551b85185e38203f7f984c6
+	b30cade420a761371c1fa7f67a8b35a5ad2fd5aecd382c460849c5eaf82dc542 be5832f3993ff63a36100b2f7b89c8d385e20dd9d72876700e7ade9fb9e6d4cb
+	e8e7a154961c68ba4f3781df40dfe676f168f5cf9184836a07df171992c3e87b f9a7f2a585cc9b5138be417dd2b546dcf39ab4853e143525b1405c2c56ecd757
+	be559fb34104b8ce491082276084e76736f5a5ec6b8d05fe31adc60ec063e447 dc07e82e31f874c386e74bb5882c269a3d33a774a7b9772b11830bf6d33bfc7e
+	9f792058552da5cbbb08693694d31a31d360be8402a3c9d41584d34e3b569be7 cd6b7acea0bdbcf8b6e8b2e62ea710ab3d9e59111202ac7a733d109c27c948fd"
 	SELFH=$(h256 "$0" 2>/dev/null)
 	# names with a line break cannot be read line by line (NetScaler's own
 	# bm_prefix_<base64> bookmarks have them); they are left out of the hashing
@@ -1835,6 +1986,8 @@ done
 		# compiled implants (Sliver, chisel: 5-10 MB) at the top of these folders
 		# shellcheck disable=SC2046
 		set -- $(dirs "/ /var /tmp /var/tmp"); [ $# -gt 0 ] && find "$@" -maxdepth 1 -type f -size +1999k -size -20480k ! -name "*$NL*" 2>>"$E"
+		# the SSH backdoor binary (watchTowr) outside the folders above
+		[ -f "$R/usr/bin/walk" ] && printf '%s\n' "$R/usr/bin/walk"
 		# the Platypus agent's folder: a compiled agent is larger than 2 MB
 		[ -d "$R/netscaler.local" ] && find "$R/netscaler.local" -type f ! -name "*$NL*" 2>>"$E"
 	} | grep -v -E '/\.?results-nshunt[^/]*\.txt$' | while IFS= read -r f; do
@@ -1850,10 +2003,12 @@ done
 	# shellcheck disable=SC2046
 	set -- $(dirs "$PLACES")
 	if [ $# -gt 0 ]; then
+		# (+ CISA SIGMA 13 Oct: two web shell code strings; GTIG: WHIPSHOT's <FATO> marker)
 		# the Unit 42 web shell strings count in code only (PHP, a script, a
 		# program or a package) - notes and IoC lists name them too
 		find "$@" -type f -size -2000k -exec env LC_ALL=C grep -laF -e '7489a0f93c67fa5cdaeb4b921d90594d' \
-			-e 'Rhfajaf1H992' -e 'e826d7ddf3c85920' -e '.ns_suidcmd' {} + 2>>"$E" |
+			-e 'Rhfajaf1H992' -e 'e826d7ddf3c85920' -e '.ns_suidcmd' \
+			-e 'http_response_code(404);eval(base64_decode($_SERVER[' -e 'e4d909c290d0fb1ca068ffaddf22cbd0' -e '<FATO>' {} + 2>>"$E" |
 			while IFS= read -r f; do
 				h=$(head -c 7 "$f" 2>/dev/null | tr -d '\177')
 				if LC_ALL=C grep -qaE '<\?php|<\?=' "$f" || [ "$(head -c 2 "$f" 2>/dev/null)" = '#!' ] || [ "$h" = '!<arch>' ] || [ "${h#ELF}" != "$h" ]
@@ -1914,7 +2069,7 @@ done
 	finding REVIEW "CVE-2026-88778: Enhanced ISN Generation is not enabled - this one needs a config change, the upgrade does not fix it" "$T/f"
 ) || { echo "[SKIPPED] check 24 (Enhanced ISN Generation) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
-# --- 25. CVE-2026-88779 (SAML): fixed build, or the stopgap in place ------
+# --- 25. SAML: CVE-2026-88779 / CVE-2026-107406 fixed, or the stopgap -----
 (
 	# CTX697174 (Oct 3, 2026): a memory overflow in SAML handling, denial of
 	# service, attacked in the wild. Affected: a config with "add authentication
@@ -1929,7 +2084,11 @@ done
 	# feature is off (a field case, via the Poppelgaard checker 1.11).
 	# Saved config, per partition.
 	: > "$T/f8"; : > "$T/f9"
-	[ "$FIX79" = yes ] && exit 0
+	# CVE-2026-107406 (CTX697191): a SAML IdP until 14.1-73.46 / 13.1-64.29,
+	# an SP only before the CTX697096 fix - nothing to do when neither applies
+	[ "$FIX79" = yes ] && { [ "$FIX406" = yes ] || { [ "$FIX406" = no ] && [ -z "$AFF406" ]; }; } && exit 0
+	V=""; [ "$FIX79" = no ] && V="CVE-2026-88779 (denial of service)"
+	[ -n "$AFF406" ] && V="${V:+$V and }CVE-2026-107406 (critical, code execution)"
 	for c in "$R/flash/nsconfig/ns.conf" "$R"/flash/nsconfig/partitions/*/ns.conf; do
 		[ -f "$c" ] || continue
 		grep -qiE '^add authentication (samlAction|samlIdPProfile) ' "$c" 2>>"$E" || continue
@@ -1981,21 +2140,21 @@ done
 		grep -q 'Responder feature is not enabled' "$T/f" && echo "enable it: enable ns feature RESPONDER ; save ns config" >> "$T/f"
 		{ [ -s "$T/f" ] && echo "Responder policy status (one of the stopgaps - see below):"
 		  cat "$T/f"
-		  if [ "$FIX79" = no ]; then echo "SAML is configured and this build ($REL-$BMA.$BMI) is not fixed for CVE-2026-88779 (CTX697174)."
-		  else echo "SAML is configured; the fix status for CVE-2026-88779 is unknown (build not identified) - check it with"
-		       echo "\"show ns version\" against CTX697174."; fi
-		  echo "Upgrade: 14.1-73.41, 13.1-64.28 (FIPS: 14.1-73.41 FIPS, 13.1-37.282) or later - Citrix's"
-		  echo "advice, also after the CTX697096 upgrade. Until then, a stopgap: the Global Deny List"
-		  echo "signatures (NetScaler Console, virtual patching; check: stat denylist global AAA_REQUEST)"
-		  echo "or the responder policy from Citrix support, bound to EVERY VPN and authentication"
-		  echo "virtual server (-type AAA_REQUEST)."; } > "$T/f8"
+		  if [ -n "$V" ]; then echo "SAML${SAMLIDP:+ (IdP)} is configured and this build ($REL-$BMA.$BMI) is affected by $V."
+		  else echo "SAML is configured; the fix status for CVE-2026-88779 / CVE-2026-107406 is unknown (build not"
+		       echo "identified) - check it with \"show ns version\" against CTX697174 and CTX697191."; fi
+		  echo "Upgrade: 14.1-73.46, 13.1-64.29 (FIPS: 14.1-73.46 FIPS, 13.1-37.283) or later - fixes both,"
+		  echo "also after the CTX697096 / CTX697174 upgrades. Stopgaps Citrix named for CVE-2026-88779: the"
+		  echo "Global Deny List signatures (NetScaler Console, virtual patching; check: stat denylist"
+		  echo "global AAA_REQUEST) or the responder policy from Citrix support, bound to EVERY VPN and"
+		  echo "authentication virtual server (-type AAA_REQUEST). Citrix names no stopgap for CVE-2026-107406."; } > "$T/f8"
 	fi
-	if [ "$FIX79" = no ]; then
-		finding REVIEW "CVE-2026-88779 (SAML, denial of service): this build is affected - upgrade" "$T/f8"
+	if [ -n "$V" ]; then
+		finding REVIEW "SAML: this build is affected by $V - upgrade to 14.1-73.46 / 13.1-64.29" "$T/f8"
 	else
-		finding REVIEW "CVE-2026-88779 (SAML, denial of service): fix status unknown - check the build (show ns version)" "$T/f8"
+		finding REVIEW "SAML (CVE-2026-88779 / CVE-2026-107406): fix status unknown - check the build (show ns version)" "$T/f8"
 	fi
-	finding REVIEW "CVE-2026-88779 stopgap: a responder policy is bound, its rule is not verified - compare it with Citrix's" "$T/f9"
+	finding REVIEW "SAML stopgap: a responder policy is bound, its rule is not verified - compare it with Citrix's" "$T/f9"
 ) || { echo "[SKIPPED] check 25 (SAML responder policy) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- Summary ---------------------------------------------------------------
