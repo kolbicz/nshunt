@@ -18,7 +18,7 @@ grep -q "$(printf '\r')" "$0" && printf '%s\n' "ERROR: $0 has Windows line endin
 # logs or a check that crashed) or the report could not be saved - never
 # trust "no findings" with exit 2.
 
-VERSION=2.5
+VERSION=2.6
 
 # anonymise <host>: stdin report -> copy that can leave the organisation.
 # Masks the host name, internal IPs and the box's own addresses, public IPs
@@ -124,7 +124,7 @@ anonymise() {
 		l = swap(l, "-policyName [^ \"]+", 12, 0, "POLICY", "")
 		payload = (l ~ /tried:|decoded |INDEX:|"K:/)
 		if (!payload) {
-			l = swap(l, "://[A-Za-z][A-Za-z0-9.-]*[A-Za-z]", 3, 0, "DOMAIN", "^(echvista\\.com|entretiensol\\.com|white-guard\\.pro|([A-Za-z0-9-]+\\.)*(pylrk\\.cc|ctrxsrv\\.com|v5v\\.in)|gs\\.thc\\.org|gsocket\\.io)$")
+			l = swap(l, "://[A-Za-z][A-Za-z0-9.-]*[A-Za-z]", 3, 0, "DOMAIN", "^(echvista\\.com|entretiensol\\.com|white-guard\\.pro|([A-Za-z0-9-]+\\.)*(pylrk\\.cc|ctrxsrv\\.com|v5v\\.in|godofthunder\\.st|botlesscucks\\.st|gettingheadfromduckysmom\\.st)|gs\\.thc\\.org|gsocket\\.io)$")
 			l = swap(l, "[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*\\.(local|lan|corp|intern|internal|intra|home|ad|priv)", 0, 0, "DOMAIN", "")
 		}
 		print ips(l, (lvl == "COMPROMISE" || lvl == "ATTEMPT") && !payload || payload)
@@ -234,6 +234,7 @@ redact() {
 	-e 's/(([Aa][Dd][Dd]|[Ss][Ee][Tt])[[:space:]]+system[[:space:]]+user[[:space:]]+(\\"[^"]*\\"|"[^"]*"|'"'"'[^'"'"']*'"'"'|[^[:space:]]+)[[:space:]]+)(\\"[^"]*\\"|"[^"]*"|'"'"'[^'"'"']*'"'"'|\\?"[^"]*$|'"'"'[^'"'"']*$|[^-[:space:]][^[:space:]]*)/\1********/g' \
 	-e 's/((^|[[:space:]"=])(-u|-U|--user)([[:space:]]+|=)"?[^[:space:]":@\/]*(:[^[:space:]":@\/]*)?:)[^[:space:]"]+/\1****/g' \
 	-e 's/([Aa]uthorization:[[:space:]]*([Bb]earer|[Bb]asic)[[:space:]]+)[^[:space:]"'"'"']+/\1****/g' \
+	-e 's/((^|[^A-Za-z0-9_])(NSC_[A-Za-z0-9_]+|[A-Za-z]*SESSID|SAMLResponse|SAMLart|[Ss]ession[Ii][Dd])=)[^;&[:space:]"'"'"']+/\1****/g' \
 	-e '/ldap[a-z]*[[:space:]]/s/([[:space:]]-w)([^[:space:]]+)/\1****/g' \
 	-e '/(sshpass|mysql)[[:space:]]/s/([[:space:]]-p)([[:space:]]*)([^-[:space:]][^[:space:]]*)/\1\2****/g' \
 	-e 's/((^|[[:space:]"=])pass:)[^[:space:]"]+/\1****/g' \
@@ -275,7 +276,7 @@ NOW=$(date -u +%Y%m%d%H%M)
 # SAML authentication configured (default or an admin partition)? Citrix, 2 Oct
 # 2026: such boxes are affected by a new, unfixed SAML issue that can run
 # commands on fixed builds too (reported from 2 Oct).
-SAMLCFG=""; SAMLIDP=""; FIX79=unknown; FIX406=unknown; AFF406=""
+SAMLCFG=""; SAMLIDP=""; FIX79=unknown; FIX406=unknown; AFF406=""; FIX263=unknown; FIX305=unknown
 for c in "$R/flash/nsconfig/ns.conf" "$R"/flash/nsconfig/partitions/*/ns.conf; do
 	[ -f "$c" ] && grep -qiE '^add authentication (samlAction|samlIdPProfile) ' "$c" 2>/dev/null && SAMLCFG=1
 	[ -f "$c" ] && grep -qiE '^add authentication samlIdPProfile ' "$c" 2>/dev/null && SAMLIDP=1
@@ -352,6 +353,17 @@ if [ -n "$BUILD" ]; then
 	13.0|12.*|11.*|10.*) FIX406=no ;;
 	*)    FIX406=unknown ;;
 	esac
+	# CTX697263 ("PHP2Shell", PHP CVE-2026-109618/109619 in the management GUI
+	# and NITRO, on CISA KEV): 14.1-73.49, 13.1-64.32, 13.1 FIPS/NDcPP 13.1-37.286.
+	# CTX697305 (12 Nov 2026, 28 CVEs; CVE-2026-120868 needs no special
+	# configuration): 14.1-73.57, 13.1-64.39, 13.1 FIPS/NDcPP 13.1-37.293.
+	case "$REL" in
+	14.1) if [ "$BMA" -eq 37 ]; then FIX263=unknown; FIX305=unknown
+	      else { ge 73 49 && FIX263=yes; } || FIX263=no; { ge 73 57 && FIX305=yes; } || FIX305=no; fi ;;
+	13.1) if [ "$BMA" -eq 37 ]; then { ge 37 286 && FIX263=yes; } || FIX263=no; { ge 37 293 && FIX305=yes; } || FIX305=no
+	      else { ge 64 32 && FIX263=yes; } || FIX263=no; { ge 64 39 && FIX305=yes; } || FIX305=no; fi ;;
+	13.0|12.*|11.*|10.*) FIX263=no; FIX305=no ;;
+	esac
 	# When did the fixed build start RUNNING? Installing it does not protect
 	# the box - the old build runs until the next boot. installns writes the
 	# kernel /flash/ns-<build>.gz once (kern.bootfile omits the .gz) and
@@ -406,6 +418,13 @@ if [ -n "$BUILD" ]; then
 	     fi ;;
 	*)   echo "Build: $REL-$BMA.$BMI - fix status unknown (FIPS numbering or a release this script does not know) - compare with the Citrix bulletin CTX697096" ;;
 	esac
+	# the newest bulletins apply to every box, whatever its configuration
+	if [ "$FIX305" = yes ]; then echo "       includes the fixes of CTX697263 (PHP2Shell) and CTX697305 (28 CVEs, Nov 2026)"
+	elif [ "$FIX305" = no ]; then
+		if [ "$FIX263" = no ]; then echo "       VULNERABLE to CTX697263 (PHP2Shell, management GUI, exploited) and CTX697305 (28 CVEs, CVSS up to 9.5)"
+		else echo "       VULNERABLE to CTX697305 (28 CVEs, CVSS up to 9.5, one in every configuration)"; fi
+		echo "       - upgrade to 14.1-73.58 / 13.1-64.39 or later (FIPS: 14.1-73.58 FIPS, 13.1-37.293)"
+	fi
 	# only boxes with SAML (SP or IdP) are affected by CVE-2026-88779
 	if [ -n "$SAMLCFG" ]; then
 		case "$FIX79" in
@@ -421,7 +440,7 @@ if [ -n "$BUILD" ]; then
 		else echo "       SAML is configured: CVE-2026-107406 fix status unknown - compare with the Citrix bulletin CTX697191"; fi
 	fi
 else
-	echo "Build: unknown - check with \"show ns version\" (fixed: 14.1-73.37, 13.1-64.24${SAMLCFG:+; with SAML: 14.1-73.46, 13.1-64.29})"
+	echo "Build: unknown - check with \"show ns version\" (fixed: 14.1-73.37, 13.1-64.24${SAMLCFG:+; with SAML: 14.1-73.46, 13.1-64.29}; latest bulletin CTX697305: 14.1-73.57, 13.1-64.39)"
 fi
 
 # A corrupt or unreadable log must not look like "no findings": test every
@@ -621,9 +640,13 @@ done
 			grep -E '^[A-Za-z0-9_-]{2,32}$' | sort -u > "$T/tags"
 		: > "$T/staged"
 		if [ -s "$T/tags" ]; then
-			echo "Payload read from the access log (log reflection) - staged script for each tag:" >> "$T/f"
 			while IFS= read -r tg; do alogs | grep -F "\"$tg:" | sed "s|^|$tg	|"; done < "$T/tags" > "$T/staged"
-			awk -F '\t' 'n[$1]++ < 3 { print "  [" $1 "] " substr($0, length($1) + 2) }' "$T/staged" | redact | cut -c1-300 >> "$T/f"
+			if [ -s "$T/staged" ]; then
+				echo "Payload read from the access log (log reflection) - staged script for each tag:" >> "$T/f"
+				awk -F '\t' 'n[$1]++ < 3 { print "  [" $1 "] " substr($0, length($1) + 2) }' "$T/staged" | redact | cut -c1-300 >> "$T/f"
+			else
+				echo "Payload read from the access log (log reflection, tag $(tr '\n' ' ' < "$T/tags" | sed 's/ $//')) - the staged script is not in the access logs still on the box: search your syslog / SIEM" >> "$T/f"
+			fi
 		fi
 		# download / callback addresses in the payloads, also in staged scripts
 		{ cut -f3 "$T/att"; cut -f2- "$T/staged"; } | grep -oE 'https?://[^ `;$|"<>'"'"'()]+|(^|[^0-9./])[0-9]{1,3}(\.[0-9]{1,3}){3}:[0-9]+[^ `;$|"<>'"'"'(){]*' |
@@ -709,6 +732,34 @@ done
 	[ $# -gt 0 ] && find "$@" -type f -exec grep -lE 'passthru[[:space:]]*\([^)]*\$_(GET|POST|REQUEST|COOKIE|SERVER)' {} + 2>>"$E" | list >> "$T/f"
 	[ $# -gt 0 ] && find "$@" -type f -exec grep -l 'NSC_TASS' {} + 2>>"$E" | list | sed 's/$/  (mentions the NSC_TASS cookie - stock name, but used by the .ctxs.receiver web shell)/' > "$T/f2"
 	sort -u -o "$T/f" "$T/f"
+	# Was it used? Requests for each file in the access logs (method, status,
+	# source, first and last time) - a 404 does not prove it did not run, a
+	# web shell may answer 404 on purpose. One-line shells that call a request
+	# parameter as a function (array_filter / call_user_func ... with $_POST)
+	# are marked (field cases: uiareas/*/gnuplot.php, viewads.php).
+	if [ -s "$T/f" ]; then
+		sed 's/^[^ ]* [^ ]*  //' "$T/f" | sed -n -e 's|^/var/netscaler/logon/|/logon/|p' -e 's|^/netscaler/ns_gui/|/|p' \
+			-e 's|^/var/netscaler/gui/|/|p' -e 's|^/var/vpn/|/vpn/|p' | sort -u > "$T/wsurl"
+		alogs | awk 'NR == FNR { want[$0] = 1; o[++k] = $0; next }
+			match($0, /"[A-Z]+ [^ "]+ [^"]*" [0-9]+/) { split(substr($0, RSTART + 1, RLENGTH - 1), a, " "); p = a[2]; sub(/\?.*/, "", p)
+				if (!(p in want)) next
+				d = ""; if (match($0, /\[[0-9]+\/[A-Za-z]+\/[0-9]+:[0-9:]+/)) d = substr($0, RSTART + 1, RLENGTH - 1)
+				n[p]++; if (!(p in f)) f[p] = d; l[p] = d; ms = a[1] " " a[4]
+				if (!((p, ms) in c)) mo[p] = mo[p] (mo[p] != "" ? ", " : "") ms; c[p, ms]++
+				if (!((p, $1) in ip) && ni[p]++ < 5) { ip[p, $1] = 1; ips[p] = ips[p] (ips[p] != "" ? ", " : "") $1 } }
+			END { for (i = 1; i <= k; i++) { p = o[i]
+				if (!n[p]) { print "  no requests for " p " in the access logs still on the box"; continue }
+				printf "  %d request(s) for %s (%s), %s .. %s, from %s%s\n", n[p], p, mo[p], f[p], l[p], ips[p], (ni[p] > 5 ? " and more" : "") } }' "$T/wsurl" - > "$T/wsreq"
+		while IFS= read -r l; do
+			x=$(printf '%s\n' "$l" | sed 's/^[^ ]* [^ ]*  //')
+			if [ -f "$R$x" ] && grep -qE '(array_(filter|map|walk)|call_user_func(_array)?|usort|uasort|register_shutdown_function)[[:space:]]*\(' "$R$x" 2>/dev/null &&
+			   grep -qE '\$_(POST|GET|REQUEST|COOKIE)' "$R$x" 2>/dev/null; then
+				printf '%s  (calls a request parameter as a function - a web shell)\n' "$l"
+			else printf '%s\n' "$l"; fi
+		done < "$T/f" > "$T/f9"
+		mv "$T/f9" "$T/f"
+		[ -s "$T/wsreq" ] && { echo "web requests for these files (count, method and status, first .. last, source) - a 404 does not"; echo "prove it failed: web shells often answer 404 on purpose:"; cat "$T/wsreq"; } >> "$T/f"
+	fi
 	finding COMPROMISE "Script or PHP code in a web folder (possible web shell)" "$T/f"
 	finding REVIEW "Files in custom theme / VPN folders that read the NSC_TASS cookie" "$T/f2"
 ) || { echo "[SKIPPED] check 4 (Web shells) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
@@ -1494,6 +1545,14 @@ done
 	# Zscaler ThreatLabz (16 Oct): download server of a Rust FreeBSD implant
 	# (also seen in Magento attacks - possibly shared infrastructure)
 	IPS="$IPS|209\\.141\\.43\\.95"
+	# Rapid7 incident analysis (19/22 Oct): nsvmd C2, .slap C2 / relay / loot
+	# upload, 1.sh host, stage on :30444, payload delivery (the last two were
+	# leads: GreyNoise / TENEX, now also first-hand incident response)
+	IPS="$IPS|209\\.74\\.64\\.192|192\\.159\\.99\\.139|179\\.60\\.146\\.241|45\\.92\\.1\\.17|46\\.151\\.182\\.18|132\\.243\\.166\\.140|173\\.231\\.39\\.244|199\\.233\\.217\\.13"
+	# the "INDEX:" log-reflection wave of November (field cases, after the fix
+	# date of the boxes - so it failed there, but it is attack traffic)
+	IPS="$IPS|45\\.61\\.177\\.50|45\\.61\\.177\\.69|45\\.61\\.177\\.74|45\\.61\\.177\\.89|45\\.61\\.177\\.93|45\\.61\\.177\\.105|45\\.61\\.177\\.112|45\\.61\\.177\\.116|45\\.61\\.177\\.117|45\\.61\\.177\\.178"
+	IPS="$IPS|172\\.86\\.85\\.47|172\\.86\\.85\\.63|172\\.86\\.74\\.210|172\\.86\\.74\\.212|64\\.95\\.11\\.81|64\\.95\\.12\\.15|69\\.67\\.173\\.95|45\\.59\\.114\\.216|153\\.75\\.90\\.86|104\\.194\\.141\\.57|198\\.251\\.85\\.211"
 	IPSN=$IPS
 	IPS="$IPS|104\\.28\\.215\\.13[67]|104\\.28\\.247\\.13[67]"
 	# One pass over all logs: every IPv4 address is counted once per line, and
@@ -1507,7 +1566,7 @@ done
 			ip = substr(l, RSTART, RLENGTH); l = substr(l, RSTART + RLENGTH)
 			if (pre ~ /[0-9.]/ || nx ~ /[0-9]/) continue
 			if (!(ip in s)) { s[ip] = 1; c[ip]++ } }
-		  if (tolower($0) ~ /echvista|entretiensol|white-guard|pylrk|ctrxsrv|v5v[.]in|gs[.]thc|gsocket|garyvard|hickoryusedauto|gurerasfalt|rockinroyaltykids|currydownsrvpark/) print > dl }
+		  if (tolower($0) ~ /echvista|entretiensol|white-guard|pylrk|ctrxsrv|v5v[.]in|godofthunder|botlesscucks|gettingheadfromduckysmom|gs[.]thc|gsocket|garyvard|hickoryusedauto|gurerasfalt|rockinroyaltykids|currydownsrvpark/) print > dl }
 		END { for (ip in c) print c[ip] "\t" ip }' > "$T/ipc"
 	TAB=$(printf '\t')
 	grep -E "$TAB($IPS)\$" "$T/ipc" | sort -t "$TAB" -k2 |
@@ -1517,10 +1576,10 @@ done
 		# IFIN, Arctic Wolf, TENEX (white-guard.pro resolves to the main C2 server);
 		# pylrk.cc serves the payload of the SAML attack on fixed builds (Oct 2026),
 		# (pyrlnk.cc, read from a screenshot, is an unregistered misspelling);
-		# gs.thc.org / gsocket.io: gsocket relays
-		grep -oiE '(^|[^A-Za-z0-9-])([A-Za-z0-9-]+\.)*(echvista\.com|entretiensol\.com|white-guard\.pro|pylrk\.cc|ctrxsrv\.com|v5v\.in|gs\.thc\.org|gsocket\.io)\.?([^A-Za-z0-9.-]|$)' |
-		grep -oiE 'echvista\.com|entretiensol\.com|white-guard\.pro|pylrk\.cc|ctrxsrv\.com|v5v\.in|gs\.thc\.org|gsocket\.io' | tr 'A-Z' 'a-z' |
-		sort | uniq -c | awk '{ printf "%-16s %d log line(s)  (attacker domain)\n", $2, $1 }' >> "$T/f"
+		# gs.thc.org / gsocket.io: gsocket relays; *.st: PHP2Shell (CISA SIGMA r2)
+		grep -oiE '(^|[^A-Za-z0-9-])([A-Za-z0-9-]+\.)*(echvista\.com|entretiensol\.com|white-guard\.pro|pylrk\.cc|ctrxsrv\.com|v5v\.in|godofthunder\.st|botlesscucks\.st|gettingheadfromduckysmom\.st|gs\.thc\.org|gsocket\.io)\.?([^A-Za-z0-9.-]|$)' |
+		grep -oiE 'echvista\.com|entretiensol\.com|white-guard\.pro|pylrk\.cc|ctrxsrv\.com|v5v\.in|godofthunder\.st|botlesscucks\.st|gettingheadfromduckysmom\.st|gs\.thc\.org|gsocket\.io' | tr 'A-Z' 'a-z' |
+		sort | uniq -c | awk '{ printf "%-26s %d log line(s)  (attacker domain)\n", $2, $1 }' >> "$T/f"
 	finding ATTEMPT "Known attacker IP addresses in the logs" "$T/f"
 	# Domains only listed in the attackers' TLS certificate (TENEX: operator-
 	# associated with moderate confidence, control not proven): a lead, no more
@@ -1530,10 +1589,13 @@ done
 		sort | uniq -c | awk '{ printf "%-24s %d log line(s)\n", $2, $1 }' > "$T/f4"
 	finding REVIEW "Domains from the attackers' certificate (moderate confidence, not proven to be theirs) - a lead, check the context" "$T/f4"
 	# Opportunistic scanners GreyNoise tagged after the public PoC, the
-	# unattributed wave TENEX saw (199.233.217.13, 130.94.20.222) (via
+	# unattributed wave TENEX saw (130.94.20.222) (via
 	# PitScaler.com), and residential-proxy probe senders Gotham saw (via the
 	# Poppelgaard checker 1.11): a hunting lead only.
-	OPP='165\.227\.201\.112|173\.231\.39\.244|64\.225\.103\.14|159\.65\.104\.231|142\.93\.205\.229|182\.101\.54\.57|87\.224\.84\.82|120\.28\.233\.211|149\.28\.58\.71|23\.234\.111\.22|198\.13\.159\.233|85\.221\.203\.85|46\.150\.68\.55|159\.26\.103\.184|45\.249\.89\.172|197\.52\.9\.138|180\.242\.113\.168|85\.117\.117\.248|73\.43\.85\.7|88\.180\.103\.22|194\.28\.195\.90|95\.63\.246\.50|31\.13\.192\.160|185\.170\.55\.89|104\.203\.50\.26|37\.19\.221\.171|45\.143\.167\.96|206\.232\.71\.215|130\.94\.106\.141|58\.187\.56\.89|171\.106\.10\.118|82\.24\.212\.15|178\.66\.43\.241|185\.209\.15\.246|94\.190\.77\.195|93\.177\.60\.233|68\.46\.140\.222|178\.218\.40\.232|49\.36\.107\.103|191\.37\.30\.194|72\.73\.231\.73|95\.229\.84\.239|113\.137\.102\.68|47\.243\.125\.255|47\.76\.92\.109|8\.217\.173\.25|8\.210\.67\.91|47\.239\.205\.29|47\.76\.132\.65|8\.218\.219\.56|47\.76\.102\.1|47\.76\.63\.52|8\.210\.119\.74|64\.177\.93\.71|44\.252\.255\.141|194\.242\.130\.193|125\.122\.56\.47|23\.132\.164\.35|54\.70\.59\.128|44\.226\.128\.41|4\.246\.63\.96|199\.233\.217\.13|130\.94\.20\.222|13\.59\.243\.24|100\.40\.202\.26|114\.181\.20\.159|114\.37\.217\.107|142\.129\.220\.168|153\.66\.69\.45|173\.77\.155\.230|184\.12\.39\.60|199\.79\.241\.36|202\.60\.177\.157|204\.210\.216\.23|209\.79\.172\.70|209\.99\.184\.231|210\.252\.36\.116|24\.126\.15\.56|27\.98\.42\.70|45\.36\.42\.217|47\.227\.98\.207|66\.188\.65\.11|67\.224\.124\.236|68\.99\.0\.48|71\.163\.14\.19|71\.163\.176\.214|73\.22\.64\.16|74\.244\.147\.208|74\.99\.67\.70|76\.36\.174\.5|76\.72\.187\.172|96\.248\.121\.105|97\.205\.234\.34|98\.29\.80\.205|99\.110\.24\.72|185\.218\.86\.25|79\.141\.161\.139|216\.252\.238\.222|38\.60\.206\.53|38\.60\.212\.144|149\.102\.254\.17|130\.94\.19\.84|138\.199\.60\.[0-9]{1,3}|194\.127\.166\.(19|32|36|70|126)|185\.220\.101\.54|192\.42\.116\.(62|65|101)|185\.100\.87\.166|72\.5\.65\.111|45\.153\.212\.10|146\.233\.40\.20|46\.236\.167\.143|46\.33\.33\.95|49\.150\.197\.119|78\.190\.152\.64|81\.10\.79\.197|95\.105\.74\.172|100\.38\.125\.66|102\.213\.132\.123|102\.222\.146\.45|103\.181\.212\.245|103\.197\.249\.161|103\.83\.146\.100|111\.92\.128\.89|114\.145\.49\.215|120\.244\.160\.182|125\.62\.88\.26|154\.183\.158\.198|154\.241\.254\.9|174\.60\.63\.37|177\.52\.203\.23|183\.63\.88\.227|190\.117\.56\.56|195\.62\.37\.119|207\.48\.184\.10'
+	OPP='165\.227\.201\.112|64\.225\.103\.14|159\.65\.104\.231|142\.93\.205\.229|182\.101\.54\.57|87\.224\.84\.82|120\.28\.233\.211|149\.28\.58\.71|23\.234\.111\.22|198\.13\.159\.233|85\.221\.203\.85|46\.150\.68\.55|159\.26\.103\.184|45\.249\.89\.172|197\.52\.9\.138|180\.242\.113\.168|85\.117\.117\.248|73\.43\.85\.7|88\.180\.103\.22|194\.28\.195\.90|95\.63\.246\.50|31\.13\.192\.160|185\.170\.55\.89|104\.203\.50\.26|37\.19\.221\.171|45\.143\.167\.96|206\.232\.71\.215|130\.94\.106\.141|58\.187\.56\.89|171\.106\.10\.118|82\.24\.212\.15|178\.66\.43\.241|185\.209\.15\.246|94\.190\.77\.195|93\.177\.60\.233|68\.46\.140\.222|178\.218\.40\.232|49\.36\.107\.103|191\.37\.30\.194|72\.73\.231\.73|95\.229\.84\.239|113\.137\.102\.68|47\.243\.125\.255|47\.76\.92\.109|8\.217\.173\.25|8\.210\.67\.91|47\.239\.205\.29|47\.76\.132\.65|8\.218\.219\.56|47\.76\.102\.1|47\.76\.63\.52|8\.210\.119\.74|64\.177\.93\.71|44\.252\.255\.141|194\.242\.130\.193|125\.122\.56\.47|23\.132\.164\.35|54\.70\.59\.128|44\.226\.128\.41|4\.246\.63\.96|130\.94\.20\.222|13\.59\.243\.24|100\.40\.202\.26|114\.181\.20\.159|114\.37\.217\.107|142\.129\.220\.168|153\.66\.69\.45|173\.77\.155\.230|184\.12\.39\.60|199\.79\.241\.36|202\.60\.177\.157|204\.210\.216\.23|209\.79\.172\.70|209\.99\.184\.231|210\.252\.36\.116|24\.126\.15\.56|27\.98\.42\.70|45\.36\.42\.217|47\.227\.98\.207|66\.188\.65\.11|67\.224\.124\.236|68\.99\.0\.48|71\.163\.14\.19|71\.163\.176\.214|73\.22\.64\.16|74\.244\.147\.208|74\.99\.67\.70|76\.36\.174\.5|76\.72\.187\.172|96\.248\.121\.105|97\.205\.234\.34|98\.29\.80\.205|99\.110\.24\.72|185\.218\.86\.25|79\.141\.161\.139|216\.252\.238\.222|38\.60\.206\.53|38\.60\.212\.144|149\.102\.254\.17|130\.94\.19\.84|138\.199\.60\.[0-9]{1,3}|194\.127\.166\.(19|32|36|70|126)|185\.220\.101\.54|192\.42\.116\.(62|65|101)|185\.100\.87\.166|72\.5\.65\.111|45\.153\.212\.101|46\.233\.40\.20|46\.236\.167\.143|46\.33\.33\.95|49\.150\.197\.119|78\.190\.152\.64|81\.10\.79\.197|95\.105\.74\.172|100\.38\.125\.66|102\.213\.132\.123|102\.222\.146\.45|103\.181\.212\.245|103\.197\.249\.161|103\.83\.146\.100|111\.92\.128\.89|114\.145\.49\.215|120\.244\.160\.182|125\.62\.88\.26|154\.183\.158\.198|154\.241\.254\.9|174\.60\.63\.37|177\.52\.203\.23|183\.63\.88\.227|190\.117\.56\.56|195\.62\.37\.119|207\.48\.184\.10'
+	# PHP2Shell (CTX697263): addresses from CISA's SIGMA rule r2 (5 Nov) - they
+	# attack PHP sites everywhere, a hit on the management GUI is a lead
+	OPP="$OPP|101\.133\.233\.159|103\.114\.163\.188|103\.216\.220\.92|104\.248\.145\.184|117\.55\.202\.115|130\.12\.180\.89|130\.94\.67\.235|134\.199\.154\.64|134\.209\.159\.64|135\.136\.21\.120|143\.246\.223\.124|144\.217\.161\.236|147\.182\.234\.126|15\.204\.59\.70|152\.42\.245\.8|162\.35\.99\.94|169\.58\.138\.154|172\.234\.200\.18|176\.124\.32\.170|18\.136\.195\.202|18\.225\.170\.231|185\.225\.191\.232|185\.242\.106\.140|198\.41\.83\.165|198\.41\.83\.174|2\.27\.248\.209|2\.59\.133\.151|208\.115\.245\.102|208\.115\.245\.98|208\.115\.245\.99|221\.14\.159\.134|23\.226\.136\.36|23\.27\.25\.75|3\.144\.181\.153|31\.223\.184\.166|31\.56\.53\.223|34\.146\.20\.31|37\.19\.200\.5|38\.60\.136\.217|38\.60\.206\.217|45\.198\.224\.169|45\.225\.135\.53|45\.39\.190\.176|45\.83\.180\.113|49\.43\.128\.164|77\.90\.185\.20|78\.17\.70\.38|81\.17\.100\.107|85\.11\.167\.243|85\.121\.179\.129|91\.90\.123\.25|92\.118\.112\.100|95\.217\.98\.37|95\.41\.54\.130|96\.126\.130\.81"
 	grep -E "$TAB($OPP)\$" "$T/ipc" | grep -vE "$TAB($IPS)\$" | sort -t "$TAB" -k1,1rn |
 		# (Zscaler ThreatLabz 16 Oct: 26 exploitation sources, mostly residential or
 		# compromised hosts; 185.220.101.54, 192.42.116.x, 185.100.87.166: Tor exits seen in the ns.conf
@@ -1543,7 +1605,7 @@ done
 		# 138.199.60.x: the range the SAML attack came from, Gotham; addresses
 		# listed as attackers above are not counted again here)
 		awk -F '\t' '{ printf "%-16s %d log line(s)\n", $2, $1 }' > "$T/f3"
-	finding ATTEMPT "Opportunistic scanners and unattributed attack waves (GreyNoise, TENEX) - hunting lead only, often residential or proxy addresses: do not block on this alone" "$T/f3"
+	finding ATTEMPT "Opportunistic scanners and unattributed attack waves (GreyNoise, TENEX, PHP2Shell) - hunting lead only, often residential or proxy addresses: do not block on this alone" "$T/f3"
 	# Live connections (not the shared WARP addresses): from the box out to a
 	# listed IP is COMPROMISE; to a service port of the box (an attack or scan
 	# going on) is ATTEMPT
@@ -1585,6 +1647,13 @@ done
 		# loot_diag.txt (via Gotham, Poppelgaard 1.12)
 		# Zscaler ThreatLabz (16 Oct): Rust FreeBSD implant fetched to /var/kw2s11
 		[ -e "$R/var/kw2s11" ] && printf '%s\n' "$R/var/kw2s11"
+		# Rapid7 (19/22 Oct): relay implant /nsconfig/.relay/, the nsvmd proxy agent
+		# in /flash/.nsvm/ (survives upgrades), recon results vcpersist-<token>_*;
+		# /tmp/sessions.log.d: proof marker (Poppelgaard 1.19)
+		for p in /flash/nsconfig/.relay /flash/.nsvm /tmp/sessions.log.d; do
+			if [ -e "$R$p" ] || [ -L "$R$p" ]; then printf '%s\n' "$R$p"; fi
+		done
+		for d in /tmp /var/tmp /flash/nsconfig /flash/nsconfig/.slap; do [ -d "$R$d" ] && find "$R$d" -maxdepth 1 -name 'vcpersist-*' 2>>"$E"; done
 		# SOCRadar "NetScaler C2" polling agent (7 Oct, via Poppelgaard 1.15)
 		for d in /tmp /var/tmp; do [ -d "$R$d" ] && find "$R$d" -maxdepth 1 -name '.nsagent*' 2>>"$E"; done
 		# watchTowr (6 Oct): proof markers, the Sliver implant ns_helper
@@ -1592,7 +1661,8 @@ done
 			/var/netscaler/logon/LogonPoint/ns0e82mz.txt /var/vpn/ns_helper /flash/nsconfig/.ns_helper; do
 			if [ -e "$R$p" ] || [ -L "$R$p" ]; then printf '%s\n' "$R$p"; fi
 		done
-		[ $# -gt 0 ] && find "$@" -type f -name 'pwn.txt' 2>>"$E"
+		# pwn.txt (watchTowr), p2s.txt (PHP2Shell proof, CISA SIGMA r2)
+		[ $# -gt 0 ] && find "$@" -type f \( -name 'pwn.txt' -o -name 'p2s.txt' \) 2>>"$E"
 		# the FreeBSD Sliver implant saved as citrix3.bad (PitScaler, 3 Oct)
 		for d in /tmp /var/tmp /var/core /var/netscaler /flash/nsconfig; do [ -d "$R$d" ] && find "$R$d" -maxdepth 4 -name 'citrix3.bad*' 2>>"$E"; done
 		for d in /tmp /var/tmp $WEB; do [ -d "$R$d" ] && find "$R$d" -maxdepth 4 -type f \( -name 'loot_nsconfig.tgz' -o -name 'loot_nshist.tgz' \
@@ -1650,7 +1720,7 @@ done
 	# /var/tmp/.host per VirusTotal) - also ordinary names
 	: > "$T/f9"
 	{ for p in /.x /s /tmp/s /var/tmp/s /lula /tmp/lula /var/tmp/lula /var/1.py /var/tmp/sh /var/tmp/.host \
-		/var/1 /var/walk /usr/bin/walk /var/netscaler/logon/LogonPoint/logon.js /tmp/.p /var/tmp/.p; do
+		/var/1 /var/walk /usr/bin/walk /tmp/walk /var/tmp/walk /var/netscaler/logon/LogonPoint/logon.js /tmp/.p /var/tmp/.p; do
 		if [ -e "$R$p" ] || [ -L "$R$p" ]; then printf '%s\n' "$R$p"; fi
 	  done
 	  for d in /tmp /var/tmp; do [ -d "$R$d" ] && find "$R$d" -maxdepth 1 \( -name 'wtw*' -o -name 'boom*' \) ! -name 'wtw888*' 2>>"$E"; done
@@ -1682,9 +1752,9 @@ done
 	: > "$T/f8"
 	for f in /flash/nsconfig/rc.netscaler /flash/nsconfig/nsafter.sh /flash/nsconfig/nsbefore.sh "$R"/var/cron/tabs/* /etc/crontab; do
 		f=${f#$R}; [ -f "$R$f" ] || continue
-		grep -nvE '^[[:space:]]*#' "$R$f" 2>/dev/null | grep -E '\.slap/|slapshot|whipd|agent\.pl' | cut -c1-160 | sed "s|^|$f:|"
+		grep -nvE '^[[:space:]]*#' "$R$f" 2>/dev/null | grep -E '\.slap/|slapshot|whipd|agent\.pl|nsvmd|\.nsvm/|\.relay/' | cut -c1-160 | sed "s|^|$f:|"
 	done | redact > "$T/f8"
-	finding REVIEW "Startup scripts or crontabs that mention the SAML-attack kit (.slap, slapshot, whipd, agent.pl) - check whether they start it" "$T/f8"
+	finding REVIEW "Startup scripts or crontabs that mention the SAML-attack kit (.slap, slapshot, whipd, agent.pl, nsvmd, .relay) - check whether they start it" "$T/f8"
 ) || { echo "[SKIPPED] check 19 (Exploit payload files) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- 20. Exploit, scanner and probe strings in the web logs ----------------
@@ -1713,6 +1783,10 @@ done
 			if (!noip && lo) printf "    %sfrom 127.0.0.x - the NetScaler itself, this log does not show the real client\n", (k ? "also " : "") }'; }
 	{
 		alogs | grep -E 'httpworkbench|CVE-2026-88771-scanner|pinggy\.net|serveousercontent\.com|ddns\.1433\.eu\.org|staticship\.org|smartdnslog\.com|ArtifactChecker/|/id009\.txt|/rce\.txt|oast\.fun|dnsl\.cc|webhook\.site|dnshook\.site|Team-NetScaler-Inventory|"[A-Z]+ /nsconmsg|NX-CVE-OK|Nx-zD|nx_verify|nx_proof|/Nx_[0-9]+\.html|wtw888|ns-88771-poc|PoCbit' | sum "exploit canary / scanner strings"
+		# PHP2Shell (CTX697263) exploit and scanner markers from CISA's SIGMA rule r2
+		# and its public PoCs - attempts against the management GUI
+		{ alogs; errlogs; } | grep -E 'B7kQpoc6|BNDRY12345|BGCTXBOUNDARY|php2shell|p2shell|p2sleak|/p2s\.txt|PWNED::|shellflow|php2scan|php-upload-progress-scan|xqsuvwz3n97wu8j3emz1axuo5y|p2s9rdme2st6guc9g0rafic|godofthunder\.st|botlesscucks\.st|gettingheadfromduckysmom\.st' |
+			sum "PHP2Shell exploit / scanner markers (CTX697263, management GUI)"
 		alogs | grep -E 'LogonPoint/custom/receiver(\.v[0-9]+)?\.min(\.[0-9a-f]+)?\.cssg?|/receiver\.deb[ ?"]|\.(ctxs|slap)\.receiver|"[A-Z]+ /[^ "?]*/LogonPoint/[^ "?]*[^/ "?]\.receiver([ ?.])' | sum "requests for *.receiver web shells (.ctxs.receiver, .slap.receiver, random names)"
 		# the key-theft payload writes a random 6-character .css into LogonPoint and
 		# fetches it (Poppelgaard 1.14 field report): 404 = failed, 200 = check it
@@ -1740,7 +1814,9 @@ done
 		# Unit 42 web shell login token
 		# + Poppelgaard 1.11/1.12: setuid shell, forced reboot, NSX markers, the SAML
 		# attack's /t/<hex> download path, the Platypus agent install and token
-		pl='xd7h/|nsmon|update_c08937|update_result_|/dev/tcp/|nc[[:space:]]+-e[[:space:]]|base64[[:space:]]+-w0|exec-ok|HTTP_X_UX|HTTP_NSC_(LDAP|CLIENTTYPE)|e826d7ddf3c85920|chmod[[:space:]]+[+]?6555|nsshutdown[^a-z]{1,8}-R|;#[[:space:]]*NSX[0-9a-fA-F]|:443/t/[0-9a-f]{6}|/api/v1/install/|AGENT_TOKEN|plt_[a-z0-9]{12,}[.]|--data-binary[[:space:]]*@|:8877/|:8899/s/|src=agent|[.]oob[.][0-9]+[.][0-9]+[.]|:65533/s|i77AMHeTM1Z7892K|/files/kw2-freebsd|"(fefypa|fdylo9):'
+		# + Rapid7 (19/22 Oct): the nsvmd installer r.sh?k=, chflags uchg (locks
+		# implant files against deletion), nsvmd -sni c.v5v.in
+		pl='r[.]sh[?]k=|chflags[[:space:]]+uchg|-sni[[:space:]]+c[.]v5v|xd7h/|nsmon|update_c08937|update_result_|/dev/tcp/|nc[[:space:]]+-e[[:space:]]|base64[[:space:]]+-w0|exec-ok|HTTP_X_UX|HTTP_NSC_(LDAP|CLIENTTYPE)|e826d7ddf3c85920|chmod[[:space:]]+[+]?6555|nsshutdown[^a-z]{1,8}-R|;#[[:space:]]*NSX[0-9a-fA-F]|:443/t/[0-9a-f]{6}|/api/v1/install/|AGENT_TOKEN|plt_[a-z0-9]{12,}[.]|--data-binary[[:space:]]*@|:8877/|:8899/s/|src=agent|[.]oob[.][0-9]+[.][0-9]+[.]|:65533/s|i77AMHeTM1Z7892K|/files/kw2-freebsd|"(fefypa|fdylo9):'
 		{ alogs; errlogs; } | grep -E "$pl" | sum "payload strings / web shell header names"
 		{ logs; logs messages; } | notadmin | grep -E "$pl" | sum "payload strings in ns.log / messages" noip
 		# attack payloads in requests to the login pages (Deyda) - still visible
@@ -1768,6 +1844,13 @@ done
 	head -10 "$T/pe" > "$T/f4"
 	n=$(wc -l < "$T/pe" | tr -d ' '); [ "$n" -gt 10 ] && echo "... $((n - 10)) more" >> "$T/f4"
 	finding COMPROMISE "PHP ran a file with a non-PHP extension (web server error log)" "$T/f4"
+	# PHP2Shell (CTX697263) crashes PHP's memory handling before any script runs:
+	# "Allowed memory size ... in Unknown on line 0" and crash traces naming
+	# pDestructor / zif_system (CISA SIGMA r2). Other faults can cause the first.
+	errlogs | grep -E 'PHP Fatal error:.*Allowed memory.* in Unknown|pDestructor|zif_system' | cut -c1-200 > "$T/pe"
+	head -10 "$T/pe" > "$T/f7"
+	n=$(wc -l < "$T/pe" | tr -d ' '); [ "$n" -gt 10 ] && echo "... $((n - 10)) more" >> "$T/f7"
+	finding REVIEW "PHP errors that PHP2Shell exploitation causes (CTX697263) - other faults can cause them too; check the time and the build" "$T/f7"
 	# The exploit canary served = the injected command ran (the file never
 	# exists on a clean box). xua.html / c88771.json are timed against the
 	# attempt in check 2 instead.
@@ -1946,7 +2029,9 @@ done
 	# watchTowr (6 Oct): Sliver ns_helper, update_c08937.pl and its web shell,
 	# the SSH backdoor dropper /var/1 and binary /var/walk, /usr/bin/walk.
 	# CISA SIGMA rule r1 (13 Oct, 8 file hashes) and Gotham kit hashes (via
-	# Poppelgaard 1.15/1.16).
+	# Poppelgaard 1.15/1.16). Rapid7 (19/22 Oct): 1.sh, 17447d.sh, 2.sh / r.sh,
+	# the scanner vc / scanner-freebsd-amd64 and the proxy agent nsvmd. PHP2Shell
+	# files from CISA's SIGMA rule r2 (5 Nov).
 	H="6f5a2a452a7901323abd21879c6cecccb47c06aeeaccb1b467212f3b11e4b1e7 ed082f744f035035900f67edf438f2f7d0528ac501234f63d476d65273cdb9a1
 	5ea5ea61e9062822bee3f66ef5ff47c217178d9e31936ad6daf10c5dfae44d12 7add390ceee4a1373211b3e340451b34f08965fc4d805f94c9b8cebdc0775774
 	73b74309f4728d169cc9edfb2767c5aadd75d39b62de93c935a86c777d2646bc 9c7bf01d2c2cb31a3609d27c1bc9abc60d86e37b7f9908547e0c75fb18b99aab
@@ -1970,7 +2055,18 @@ done
 	b30cade420a761371c1fa7f67a8b35a5ad2fd5aecd382c460849c5eaf82dc542 be5832f3993ff63a36100b2f7b89c8d385e20dd9d72876700e7ade9fb9e6d4cb
 	e8e7a154961c68ba4f3781df40dfe676f168f5cf9184836a07df171992c3e87b f9a7f2a585cc9b5138be417dd2b546dcf39ab4853e143525b1405c2c56ecd757
 	be559fb34104b8ce491082276084e76736f5a5ec6b8d05fe31adc60ec063e447 dc07e82e31f874c386e74bb5882c269a3d33a774a7b9772b11830bf6d33bfc7e
-	9f792058552da5cbbb08693694d31a31d360be8402a3c9d41584d34e3b569be7 cd6b7acea0bdbcf8b6e8b2e62ea710ab3d9e59111202ac7a733d109c27c948fd"
+	9f792058552da5cbbb08693694d31a31d360be8402a3c9d41584d34e3b569be7 cd6b7acea0bdbcf8b6e8b2e62ea710ab3d9e59111202ac7a733d109c27c948fd
+	6774bfed99da38cec82e721de4bd64a67db7840efadcc71e7df02eb6f0a03c44 a0ba4e1ad622d9c3d950b4156d4430812d05bee216ab22c3804a9f7a80535556
+	56a892d80096a9db4ca473a9c3109729c60a5ba901d6ba65948bdb1f4a6fb186 8e8b9532ce40eacfe1b4cf2b11241878b70b910aabd90b453b1460df19b51a4d
+	eaf0086237879bbaac00a5874c0e2ff84deede1ba10e6b706e2288fd3a31cdde ffe052fc50271e7739d458b155df790438776032bfd125b974735e1dd9c0b138
+	0c5486f06620e26e316f4b33f318b0d646d5e1133789331aa2fed012360d1486 267a3c8ed021a0a52c29bf076617a0dfd5cd5285202b8d0bd9ad0712110ccae8
+	e2529d4afa39ae4db2eb05d5176317c906289abf09660c75bdeec43e54c55aa3 150ae88f0999032e2a6113501d6082f54a3ed98d02427b21a96e773a27d7bf16
+	40caf199ca1ebe056a74427f8e9db06c66899e33ae09c0ec2769ec70bf6dd8e7 27d926a6708d6769d97d065e7a5a860ab496eab272c03d1cebc55ec71b954fa2
+	1485e14e0f62bc94664eec341cabd275dad7d30b1d496c40ec340c9a0d9f0ba8 535b9e298defd3449ba2b10b9828925d3ce344872dcbd9470c0e8db20f0aae83
+	6f84cc354b785157983efa8f4b674d2e1d6c3331017f29ff8d51bc43668d4b0f 2d692ee6dcb41c249c55881897b7dec0550b92963e07fccdb11ad655601977c3
+	66bcbc8c2b9d847a1e976e57972e10eac98e9b894cbf30510bff1e8d63efb81f 1c93ea48fa7ff886a6d81e44869dd7962309e95d01c1561df362b0b18007a562
+	9c15dc5a510bf2e8a16c846e61fa35c50ef733b72d4e47b6e8307498a398443c c1e81cfbaf7e4cccad7d7f43c1a624b791ba1b7f1d176e224455138604837b4c
+	5e99d6023dce9bb18d845a37fcdbc7ea574fdb20ab8d888ec54c695382d46036"
 	SELFH=$(h256 "$0" 2>/dev/null)
 	# names with a line break cannot be read line by line (NetScaler's own
 	# bm_prefix_<base64> bookmarks have them); they are left out of the hashing
@@ -2156,6 +2252,128 @@ done
 	fi
 	finding REVIEW "SAML stopgap: a responder policy is bound, its rule is not verified - compare it with Citrix's" "$T/f9"
 ) || { echo "[SKIPPED] check 25 (SAML responder policy) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
+
+# --- 26. Newest bulletins: CTX697263 (PHP2Shell) and CTX697305 ------------
+(
+	# Both apply to every box, whatever its configuration: PHP2Shell is in the
+	# management GUI and NITRO (NSIP, management SNIPs, CLIP), exploited and on
+	# CISA KEV since 26 Oct 2026; CTX697305 (12 Nov 2026) fixes 28 CVEs, among
+	# them CVE-2026-120868 (CVSS 9.3, default configuration). No exploitation
+	# of CTX697305 was known when it was published.
+	: > "$T/f"
+	[ "$FIX305" = no ] || exit 0
+	{ echo "This build ($REL-$BMA.$BMI) is missing:"
+	  if [ "$FIX263" = no ]; then
+		echo "  CTX697263 - PHP2Shell (PHP CVE-2026-109618 / 109619, CVSS 9.2) in the management GUI and NITRO,"
+		echo "              exploited in the wild (CISA KEV); fixed in 14.1-73.49 / 13.1-64.32 / 13.1-37.286."
+		echo "              Until the upgrade: allow management access only from admin networks"
+		echo "              (add ns acl ..., CTX228148) - never expose the NSIP, management SNIPs or CLIP."
+	  fi
+	  echo "  CTX697305 - 28 CVEs (Nov 2026, CVSS up to 9.5); CVE-2026-120868 (9.3) affects every"
+	  echo "              configuration. No exploitation known when it was published."
+	  echo "Upgrade: 14.1-73.58 / 13.1-64.39 or later (FIPS: 14.1-73.58 FIPS, 13.1-FIPS/NDcPP 13.1-37.293)."; } > "$T/f"
+	# Which CTX697305 CVEs this configuration is also exposed to, by the
+	# preconditions Citrix lists (saved config, per partition). Only a guide for
+	# priorities: CVE-2026-120868 alone needs the upgrade.
+	for c in "$R/flash/nsconfig/ns.conf" "$R"/flash/nsconfig/partitions/*/ns.conf; do
+		[ -f "$c" ] || continue
+		case "$c" in
+		*/partitions/*) p=${c%/ns.conf}; where="admin partition ${p##*/}" ;;
+		*) where="default partition" ;;
+		esac
+		awk -v where="$where" '
+		function tok(s,   t, q, e) { sub(/^ +/, "", s); q = substr(s, 1, 1)
+			if ((q == "\"" || q == "\047") && (e = index(substr(s, 2), q))) { t = substr(s, 2, e - 1); REST = substr(s, e + 2) }
+			else { match(s, /^[^ ]*/); t = substr(s, 1, RLENGTH); REST = substr(s, RLENGTH + 1) }
+			return t }
+		function hit(k) { N[k]++ }
+		{ l = tolower($0) }
+		# virtual servers: type and HTTP profile
+		l ~ /^add (lb|cs|vpn|authentication|cr) vserver / { s = $0; sub(/^[^ ]+ +[^ ]+ +[^ ]+ +/, "", s); nm = tok(s)
+			ty = toupper(tok(REST)); kind = tolower($2); r = " " tolower(REST) " "
+			if (kind == "vpn" || kind == "authentication") hit("gw")
+			if (kind == "cr" && ty == "HDX") hit("hdx")
+			if ((kind == "lb" || kind == "cs") && ty == "SMPP") hit("smpp")
+			if (kind == "lb" && ty == "PUSH") hit("push")
+			if (kind == "lb" && ty == "RTSP") hit("rtsp")
+			if (kind == "lb" && (ty == "DIAMETER" || ty == "SIP_TCP" || ty == "MQTT" || ty == "RADIUS")) hit("diam")
+			if ((kind == "lb" || kind == "cs") && ty == "HTTP_QUIC") hit("quic")
+			doh = (ty == "SSL" && r ~ / -dnsoverhttps enabled /)
+			if ((kind == "lb" || kind == "cs") && doh) hit("doh")
+			if ((kind == "lb" || kind == "cs") && (ty == "DNS" || ty == "DNS_TCP" || ty == "DOT" || doh)) DP = 1
+			if (kind == "lb" || kind == "cs" || kind == "vpn") if (ty == "HTTP" || ty == "SSL") {
+				hp = ""; if (match(r, / -httpprofilename +[^ ]+/)) { hp = substr(r, RSTART, RLENGTH); sub(/^ -httpprofilename +/, "", hp); gsub(/"/, "", hp) }
+				V[++nv] = hp } }
+		l ~ /^(add|set) ns httpprofile / && l ~ / -http2 enabled( |$)/ { s = $0; sub(/^[^ ]+ +[^ ]+ +[^ ]+ +/, "", s); H2[tolower(tok(s))] = 1 }
+		l ~ /^set dns parameter / && l ~ / -recursion enabled( |$)/ { REC = 1 }
+		l ~ /^(add|set) dns profile / && l ~ / -recursiveresolution enabled( |$)/ { REC = 1 }
+		l ~ /^add lsn group / && l ~ / -rtspalg enabled( |$)/ { hit("rtsp") }
+		l ~ /^add lsn group / && l ~ / -sipalg enabled( |$)/ { hit("sipdns") }
+		l ~ /^(add|set) dns profile / && l ~ / -dnsanswerseclogging enabled( |$)/ { hit("sipdns") }
+		l ~ /^add authentication samlaction / { hit("saml") }
+		l ~ /^add authentication webauthaction / { hit("webauth") }
+		l ~ /^add authentication emailaction / { hit("email"); hit("kba") }
+		l ~ /^add authentication ldapaction / && l ~ / -kbattribute / { hit("kba") }
+		l ~ /^add authentication certaction / { hit("cert") }
+		l ~ /^add authentication epaaction / || l ~ /^add aaa preauthenticationpolicy / || (l ~ /^(set vpn parameter|add vpn sessionaction) / && l ~ / -clientsecurity /) { hit("epa") }
+		index(l, "b64decode") { hit("b64") }
+		# AppFW protections Citrix names; a NONE action is off
+		l ~ /^(add|set) appfw profile / { n = split(l, w, / +/)
+			for (i = 4; i < n; i++) if (w[i] ~ /^-(apispec|grpcaction|signatures|postbodylimitsignature|xml(dos|format|validation|wsi|sqlinjection|xss|attachment|soapfault)action|infercontenttypexmlpayloadaction|fieldconsistencyaction|sqlinjectionaction|fieldformataction|starturlaction|excludefileuploadfromchecks|sessionlessurlclosure|starturlclosure)$/ && w[i + 1] != "none" && w[i + 1] != "off" && w[i + 1] != "\"\"") { hit("appfw"); break } }
+		# GSLB: Metric Exchange is on unless disabled
+		l ~ /^add gslb site / && l !~ / -metricexchange disabled( |$)/ { hit("gslb") }
+		l ~ /^set gslb parameter / && l ~ / -automaticconfigsync enabled( |$)/ { hit("gslb") }
+		l ~ /^add gslb vserver / && l ~ / -lbmethod staticproximity( |$)/ { hit("gslb") }
+		l ~ /^add responder policy / && index(l, "matches_location(") { hit("gslb") }
+		l ~ /^(add|set) ssl profile / && l ~ / -encryptedclienthello enabled( |$)/ { hit("ssl") }
+		l ~ /^add (ssl )?hsmkey / && l ~ / -hsmtype safenet( |$)/ { hit("ssl") }
+		END {
+			if (REC && DP) hit("dnsrec")
+			for (i = 1; i <= nv; i++) if ((V[i] == "" && H2["nshttp_default_profile"]) || (V[i] != "" && H2[tolower(V[i])])) hit("h2")
+			split("gw hdx epa email kba saml webauth cert b64 h2 appfw smpp dnsrec doh push rtsp diam gslb sipdns quic ssl", K, " ")
+			L["gw"] = "CVE-2026-107412 (9.5), 120864 (9.3), 111342, 111333 - Gateway or AAA virtual server"
+			L["hdx"] = "CVE-2026-120864 (9.3) - CR virtual server of type HDX"
+			L["epa"] = "CVE-2026-111334 (9.3) - Endpoint Analysis (EPA)"
+			L["email"] = "CVE-2026-107415 (9.3) - Email OTP (emailAction)"
+			L["kba"] = "CVE-2026-111340 (8.7) - KBA (ldapAction -KBAttribute or emailAction)"
+			L["saml"] = "CVE-2026-107413 (8.7) - SAML action"
+			L["webauth"] = "CVE-2026-107414 (8.7) - WebAuth action"
+			L["cert"] = "CVE-2026-111341 (8.7) - client certificate authentication (certAction)"
+			L["b64"] = "CVE-2026-111337 (8.7) - B64DECODE in a policy expression"
+			L["h2"] = "CVE-2026-111336 (8.3) - HTTP/2 enabled in the HTTP profile of a virtual server"
+			L["appfw"] = "CVE-2026-111339 (6.9) - AppFW profile with XML, signature, API or related protections"
+			L["smpp"] = "CVE-2026-107407 (9.3) - SMPP virtual server"
+			L["dnsrec"] = "CVE-2026-107408 (9.3) - DNS load balancing with recursive resolution"
+			L["doh"] = "CVE-2026-107409 (9.3) - DNS over HTTPS (DoH) virtual server"
+			L["push"] = "CVE-2026-107410 (9.3) - PUSH virtual server"
+			L["rtsp"] = "CVE-2026-107411 (8.7) - RTSP virtual server or RTSP ALG"
+			L["diam"] = "CVE-2026-120860 (8.7) - DIAMETER, SIP_TCP, MQTT or RADIUS virtual server"
+			L["gslb"] = "CVE-2026-120861 (8.7) - GSLB (Metric Exchange, static proximity, config sync, geolocation policy)"
+			L["sipdns"] = "CVE-2026-120862 (8.7) - SIP ALG on an LSN group or DNS answer-section logging"
+			L["quic"] = "CVE-2026-120865 (8.7) - HTTP_QUIC virtual server"
+			L["ssl"] = "CVE-2026-120867 (8.7) - TLS 1.3 Encrypted Client Hello or SafeNet HSM key"
+			for (i = 1; i in K; i++) if (N[K[i]]) printf "  %s  (%s: %d)\n", L[K[i]], where, N[K[i]] }' "$c" 2>>"$E"
+	done > "$T/f3"
+	# BGP (CVE-2026-120866): feature on and a neighbor without a TCP-MD5 password
+	if grep -qiE '^enable ns feature .* bgp( |$)' "$R/flash/nsconfig/ns.conf" 2>>"$E" && [ -f "$R/flash/nsconfig/ZebOS.conf" ]; then
+		awk '{ l = tolower($0) } l ~ /^ *neighbor [^ ]+ remote-as / { split(l, w, / +/); n = (w[1] == "" ? w[3] : w[2]); NB[n] = 1 }
+			l ~ /^ *neighbor [^ ]+ password / { split(l, w, / +/); n = (w[1] == "" ? w[3] : w[2]); PW[n] = 1 }
+			END { for (n in NB) if (!(n in PW)) k++; if (k) printf "  CVE-2026-120866 (7.7) - BGP neighbor without TCP-MD5 password  (ZebOS.conf: %d)\n", k }' \
+			"$R/flash/nsconfig/ZebOS.conf" 2>>"$E" >> "$T/f3"
+	fi
+	{ echo "All builds before the fix: CVE-2026-120868 (9.3, every configuration); CVE-2026-120863 (8.7)"
+	  echo "if the NSIP can be reached from untrusted networks."
+	  if [ -s "$T/f3" ]; then echo "This configuration is also exposed to (Citrix's preconditions, saved config; count of matching entries):"; cat "$T/f3"
+	  else echo "None of the configuration-dependent CVEs of CTX697305 matches the saved config."; fi
+	  echo "Only the saved config is read: run save ns config first if you changed it live."
+	  echo "CVE-2026-111338: until the upgrade, /var/log/httperror.log can hold authentication material"
+	  echo "after a logout - treat it, and support bundles that contain it, as sensitive."; } >> "$T/f"
+	if [ "$FIX263" = no ]; then
+		finding REVIEW "Build is affected by PHP2Shell (CTX697263, exploited) and CTX697305 - upgrade to 14.1-73.58 / 13.1-64.39" "$T/f"
+	else
+		finding REVIEW "Build is affected by CTX697305 (28 CVEs, CVSS up to 9.5) - upgrade to 14.1-73.58 / 13.1-64.39" "$T/f"
+	fi
+) || { echo "[SKIPPED] check 26 (newest bulletins) stopped with an error (exit $?)"; echo SKIPPED >> "$T/count"; }
 
 # --- Summary ---------------------------------------------------------------
 nb=0; for f in "$R"/var/vpn/bookmark/*.xml "$R"/var/vpn/bookmark/*/*.xml; do [ -f "$f" ] && nb=$((nb + 1)); done

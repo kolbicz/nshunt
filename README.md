@@ -70,8 +70,11 @@ with SAML authentication configured, further lines show whether the build
 includes the fixes for CVE-2026-88779 (CTX697174: 14.1-73.41, 13.1-64.28) and
 CVE-2026-107406 (CTX697191: 14.1-73.46, 13.1-64.29 - for a SAML IdP, or an SP
 on a build before 14.1-73.37 / 13.1-64.23); if CVE-2026-88779 is not fixed,
-attempts from 2 October 2026 on (the SAML attack wave) are marked too. 15.1 is a
-Technology Preview: it is shown as vulnerable, there is no fix for it yet.
+attempts from 2 October 2026 on (the SAML attack wave) are marked too. On every
+box, a further line says whether the build includes the fixes of CTX697263
+(PHP2Shell: 14.1-73.49, 13.1-64.32) and CTX697305 (28 CVEs: 14.1-73.57,
+13.1-64.39). 15.1 is a Technology Preview: it is shown as vulnerable, there is
+no fix for it yet.
 
 The numbers in the `RESULT` line count finding blocks, i.e. kinds of evidence,
 not IP addresses or attempts. The output ends with a short "What this means"
@@ -80,7 +83,7 @@ section that explains the result in plain words.
 Example:
 
 ```
-NetScaler quick hunt 2.5 - ns01 - 2026-09-30 14:43
+NetScaler quick hunt 2.6 - ns01 - 2026-09-30 14:43
 Build: 14.1-73.37 - includes the fix for CVE-2026-88771/88772
        fixed build running since 2026-09-28 11:55 UTC (first boot after the install; installed 2026-09-28 11:48 UTC)
 
@@ -153,7 +156,8 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
    firewall logs. An injection that only greps a tagged script out of the
    access log and runs it ("log reflection", Lupovis) is shown together with
    the staged script for each tag, and the addresses in that script go into the
-   firewall list too. The same payload text copied into `/var/log/messages` is
+   firewall list too. If the staged script is no longer in the access logs on
+   the box, the output says so: look for it in your syslog / SIEM. The same payload text copied into `/var/log/messages` is
    reported too.
 3. **Path-traversal probes carrying commands** - requests the NetScaler logged
    and blocked as `Path traversal detected` that contained `curl`, `wget` or
@@ -162,6 +166,11 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
    or `<?php` / `<?=` code inside other files, in web folders outside the stock
    admin UI, and `passthru(` fed from request input in `LogonPoint/custom` and
    `/var/vpn`. Files there that only read the stock `NSC_TASS` cookie are `REVIEW`.
+   For each file found, the web requests for it are listed (count, method,
+   status, first and last time, source): web shells often answer `404` on
+   purpose, so a `404` does not prove the request failed. A file that calls a
+   request parameter as a function (`array_filter`, `call_user_func`, ...) is
+   marked as a web shell.
 5. **Files written by the web server** - files owned by `nobody` in
    `/var/netscaler/logon`, `/var/netscaler/gui` and `/netscaler/ns_gui`.
 6. **Hidden files, folders and links** in web folders (`REVIEW`). The published
@@ -223,7 +232,8 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     copies into the web folders or `httpd.conf` - the documented way to keep
     customisations - are `REVIEW`; reading them, or a backup copy from them, is
     not reported. Startup scripts and crontabs that mention the SAML-attack kit
-    are `REVIEW` with the lines. `/var/python/bin/customsnmpd`, which attackers
+    or the `nsvmd` proxy agent (`.slap/`, `.nsvm/`, `.relay/`) are `REVIEW` with
+    the lines. `/var/python/bin/customsnmpd`, which attackers
     modified for persistence, is `COMPROMISE` with download, loader or shell code
     in it (comments ignored) and `REVIEW` if it is not the stock wrapper - by
     content, not by date.
@@ -287,7 +297,7 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     Rapid7, TENEX, Sygnia, Beazley, Huntback.io, watchTowr, Lupovis, SOCRadar and
     Zscaler, and the domains `echvista.com`, `entretiensol.com`,
     `white-guard.pro`, `pylrk.cc` (SAML attack payload server), `ctrxsrv.com`,
-    `v5v.in`, `gs.thc.org` and `gsocket.io`, in `ns.log*`, `/var/log/messages*` and the web access
+    `v5v.in`, `gs.thc.org`, `gsocket.io` and three PHP2Shell domains, in `ns.log*`, `/var/log/messages*` and the web access
     logs, and in current connections (from the box out: `COMPROMISE`; to a
     service of the box: `ATTEMPT`). The Cloudflare WARP addresses on the list
     are marked, because ordinary WARP users share them, and never count as a
@@ -295,8 +305,9 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     admin PC) are not counted. The logs are read once: every address is counted
     per log line. About 130 opportunistic scanners and residential or
     hijacked senders (GreyNoise, Gotham, Zscaler), Tor and Mullvad VPN exits,
-    the 138.199.60.0/24 range the SAML attack came from, and an unattributed
-    wave (TENEX) are listed separately
+    the 138.199.60.0/24 range the SAML attack came from, an unattributed
+    wave (TENEX) and about 55 PHP2Shell sources from CISA's detection rule
+    (they attack PHP sites everywhere) are listed separately
     as a hunting lead only, and so are five domains that only appear in the
     attackers' certificate (`REVIEW`, moderate confidence).
 19. **Files written by the published exploit payloads** - known dropped file
@@ -309,12 +320,16 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     staging `loot_nsconfig.tgz`, `loot_nshist.tgz`, `loot_httpd.conf`,
     `loot_diag.txt`), `citrix3.bad`, the name the Sliver implant was saved
     under, the Sliver implant `ns_helper` (`/var/vpn`, `/nsconfig/.ns_helper/`),
-    the polling agent `/tmp/.nsagent*`, the Rust implant `/var/kw2s11`, proof
-    markers (`/var/tmp/cve88771*`, `ns_ctx.html`, `ns0e82mz.txt`, `pwn.txt` and
+    the polling agent `/tmp/.nsagent*`, the Rust implant `/var/kw2s11`, the
+    relay implant `/nsconfig/.relay/`, the `nsvmd` proxy agent in `/flash/.nsvm/`
+    (survives upgrades) and its scan results `vcpersist-*` (Rapid7), proof
+    markers (`/var/tmp/cve88771*`, `/tmp/sessions.log.d`, `ns_ctx.html`,
+    `ns0e82mz.txt`, `pwn.txt`, the PHP2Shell marker `p2s.txt` and
     `Nx_<n>.php` / `.pl` in web folders), and private keys or NetScaler
     configuration in a web folder under any name (how the key-theft payload
     stages them, e.g. as a random `.css`). Short names the payloads also used
     (`/s`, `/.x`, `lula`, `/var/1.py`, `/var/1`, `/var/walk`, `/usr/bin/walk`,
+    `/tmp/walk`, `/var/tmp/walk`,
     `/var/tmp/sh`, `/var/tmp/.host`, `/tmp/.p`, `logon.js`, `p.txt`, `boom*`,
     `wtw*`, other `loot_*` files) and the SAML attack's payload name `/v` are ordinary names
     too: `REVIEW` (a known hash is `COMPROMISE` in check 23). Small files in the web
@@ -334,6 +349,8 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     `ArtifactChecker`, requests for `/nsconmsg`, `id009.txt`, `rce.txt`), requests
     for `*.receiver` web shells and their `receiver(.v2).min.css` aliases,
     pick-ups of a random 6-character `.css` in LogonPoint (key-theft staging),
+    PHP2Shell exploit and scanner markers (`B7kQpoc61*`, `BNDRY12345`,
+    `php2shell`, `p2s.txt`, `PWNED::`, ... from CISA's detection rule),
     CVE-2026-88779 probes (User-Agent `probe/1` or very long requests to
     `/saml/login`, `/saml/logout` / `/cgi/samlauth`, a hunting lead), the login
     injection sent on any other path or in the User-Agent, 1-byte `nsepa.deb` probes,
@@ -347,10 +364,14 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     with a `2xx` status is `COMPROMISE`: it only exists if an injected command ran. HeadlessChrome requests are
     `REVIEW`. PHP errors raised inside a file with a non-PHP extension (`.sig`,
     `.deb`, `.ico`, ...) in the error logs are `COMPROMISE`: PHP executed it.
+    PHP errors that PHP2Shell exploitation causes (`Allowed memory size ... in
+    Unknown on line 0`, crash traces naming `pDestructor` / `zif_system`) are
+    `REVIEW`: other faults can cause them too.
     Also `ATTEMPT`: payload strings (`xd7h/`, `/dev/tcp/`, `nc -e`,
     `base64 -w0`, `exec-ok`, `chmod 6555`, `nsshutdown -R`, `;#NSX...`, the SAML
     attack's `:443/t/<hex>` download path, web shell header names, Platypus agent
-    install, token and traffic),
+    install, token and traffic, the `nsvmd` installer `r.sh?k=`, `chflags uchg`
+    and `-sni c.v5v.in`),
     requests for the `.local_journal` web shell alias and `insight-new.js`,
     attack payloads in
     login-page requests (still visible after `ns.log` has rotated), any
@@ -391,7 +412,8 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
 23. **Known web shells and payloads by hash and code** - SHA-256 of published
     web shells and payloads (GreyNoise, IFIN, eSentire, Arctic Wolf, Unit 42,
     SpiderLabs, watchTowr, CISA and Gotham, and files of the SAML attack: the `/v`
-    script, kit, chisel and Sliver implants) in the web, plugin and media folders, `/tmp`, `/var/tmp`
+    script, kit, chisel and Sliver implants; Rapid7: droppers, the `nsvmd` proxy
+    agent and the reconnaissance scanner; PHP2Shell files from CISA's rule) in the web, plugin and media folders, `/tmp`, `/var/tmp`
     and the top of `/` and `/var` (there also compiled implants up to 20 MB); WHIPSHOT code (`HTTP_X_UX` read by code, `HTTP_NSC_CLIENTTYPE` /
     `LDAP` with `eval(`-style calls, its `<FATO>` marker), the CISA rule's web
     shell code and the Unit 42 web shell's key, passphrase and token in code (PHP, a script, a program or a package). Hashes change per
@@ -422,6 +444,27 @@ If a check crashes, it is reported as `[SKIPPED]` and the remaining checks still
     off. It cannot verify the rule itself: a bound policy is listed as `REVIEW`
     too, to compare with the one from Citrix support. A fixed build needs none
     of this; an unidentified build is reported as "fix status unknown".
+26. **Newest bulletins: CTX697263 (PHP2Shell) and CTX697305** - both apply to
+    every NetScaler, whatever its configuration. PHP2Shell (PHP
+    CVE-2026-109618 / 109619) is in the management GUI and NITRO, exploited in
+    the wild and on the CISA KEV list; fixed in 14.1-73.49 / 13.1-64.32 /
+    13.1-37.286. CTX697305 (12 November 2026) fixes 28 CVEs with CVSS up to
+    9.5; CVE-2026-120868 needs no special configuration. A build without these
+    fixes is `REVIEW`: upgrade to 14.1-73.58 / 13.1-64.39 or later (FIPS:
+    14.1-73.58 FIPS, 13.1-37.293). Until then, allow management access only from
+    admin networks (`add ns acl`, CTX228148). To help decide which boxes to
+    upgrade first, the finding also lists which other CTX697305 CVEs the saved
+    configuration (each partition) is exposed to, by the preconditions Citrix
+    publishes: Gateway / AAA and HDX virtual servers, EPA, Email OTP, KBA, SAML,
+    WebAuth and certificate actions, `B64DECODE` in a policy, HTTP/2 in a
+    virtual server's HTTP profile, AppFW protections, SMPP, PUSH, RTSP,
+    DIAMETER / SIP_TCP / MQTT / RADIUS and HTTP_QUIC virtual servers, DNS with
+    recursive resolution, DoH, GSLB options, SIP ALG / DNS answer-section
+    logging, Encrypted Client Hello and SafeNet HSM keys, and BGP neighbors
+    without a TCP-MD5 password (`ZebOS.conf`). Only counts are shown, no names.
+    Because of CVE-2026-111338, until the upgrade `httperror.log` can hold
+    authentication material: nshunt masks NetScaler session cookies, session
+    IDs and SAML responses in every line it prints.
 
 ## Sharing the output
 
